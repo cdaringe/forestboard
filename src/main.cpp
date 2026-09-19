@@ -1,93 +1,84 @@
 #include <Arduino.h>
 
+#include "display/display_controller.h"
+#include "keyboard/input_controller.h"
+
 namespace {
 
-// Onboard LED -> P1.21 / B2 -> PB2 (active high).
-constexpr uint32_t kOnboardLedPin = PB2;
+constexpr uint32_t kOnboardLedPin = PB2; // P1.21 / B2 / MCU PB2.
+constexpr uint32_t kHeartbeatPeriodMs = 1000;
+constexpr uint32_t kHeartbeatOnMs = 60;
 
-// Matrix net -> WeAct header pin / board label -> MCU GPIO.
-// Mapping is from keyboard/a10/keyboard/keyboard.kicad_sch.
-constexpr uint32_t kMatrixPins[] = {
-    PC0,   // ROW0  -> P1.5  / C0  -> PC0
-    PC2,   // ROW1  -> P1.7  / C2  -> PC2
-    PC1,   // ROW2  -> P1.8  / C1  -> PC1
-    PA0,   // ROW3  -> P1.9  / A0  -> PA0
-    PC3,   // ROW4  -> P1.10 / C3  -> PC3
-    PA2,   // ROW5  -> P1.11 / A2  -> PA2
-    PA1,   // ROW6  -> P1.12 / A1  -> PA1
-    PA4,   // ROW7  -> P1.13 / A4  -> PA4
-    PA3,   // ROW8  -> P1.14 / A3  -> PA3
-    PA6,   // ROW9  -> P1.15 / A6  -> PA6
-    PA5,   // ROW10 -> P1.16 / A5  -> PA5
-    PC4,   // ROW11 -> P1.17 / C4  -> PC4
-    PB9,   // COL0  -> P2.1  / B9  -> PB9
-    PB8,   // COL1  -> P2.4  / B8  -> PB8
-    PB5,   // COL2  -> P2.5  / B5  -> PB5
-    PB3,   // COL3  -> P2.7  / B3  -> PB3
-    PB4,   // COL4  -> P2.8  / B4  -> PB4
-    PC12,  // COL5  -> P2.9  / C12 -> PC12
-    PD2,   // COL6  -> P2.10 / D2  -> PD2
-    PC10,  // COL7  -> P2.11 / C10 -> PC10
-    PC11,  // COL8  -> P2.12 / C11 -> PC11
-    PA15,  // COL9  -> P2.14 / A15 -> PA15
-    PA10,  // COL10 -> P2.15 / A10 -> PA10
-    PA8,   // COL11 -> P2.17 / A8  -> PA8
-};
+DisplayController displayController;
+InputController inputController;
 
-constexpr uint32_t kStartupOnMs = 1000;
-constexpr uint32_t kStartupOffMs = 250;
-constexpr uint32_t kMarkerOnMs = 10;
-constexpr uint32_t kMarkerOffMs = 10;
-constexpr uint32_t kPinOnMs = 50;
-constexpr uint32_t kPinOffMs = 50                                                                                                                                                                                                                                                  ;
-
-void showStartupIndicator() {
-  // A long, unmistakable pulse means the application has left the DFU
-  // bootloader and started running.
-  digitalWrite(kOnboardLedPin, HIGH);
-  delay(kStartupOnMs);
-  digitalWrite(kOnboardLedPin, LOW);
-  delay(kStartupOffMs);
+DisplayStatus currentDisplayStatus() {
+  return {
+      inputController.layoutBadgeLabel(),
+      inputController.keyCaptureText(),
+      inputController.keystrokeCount(),
+      inputController.isNumLockActive(),
+      inputController.isInsertModeActive(),
+      inputController.isKeyCaptureActive(),
+      inputController.isKeyActive(KeyboardKey::Function),
+      inputController.isGameModeActive(),
+  };
 }
 
-void flashOnboardLedTwice() {
-  for (uint8_t flash = 0; flash < 2; ++flash) {
-    digitalWrite(kOnboardLedPin, HIGH);
-    delay(kMarkerOnMs);
-    digitalWrite(kOnboardLedPin, LOW);
-    delay(kMarkerOffMs);
+void celebratePendingKeystrokeMilestone(uint32_t now) {
+  uint32_t milestoneCount = 0;
+  if (inputController.takeKeystrokeMilestone(milestoneCount)) {
+    displayController.celebrateKeystrokeMilestone(now, milestoneCount);
   }
 }
 
-void flashMatrixPin(uint32_t pin) {
-  // Preload HIGH before enabling the output to avoid a brief low-going glitch.
-  digitalWrite(pin, HIGH);
-  pinMode(pin, OUTPUT);
-  delay(kPinOnMs);
-
-  digitalWrite(pin, LOW);
-  delay(kPinOffMs);
-
-  // Leave inactive matrix nets high-impedance so they cannot fight each other.
-  pinMode(pin, INPUT);
+void applyPendingAnimationControl(uint32_t now) {
+  int8_t direction = 0;
+  if (inputController.takeAnimationStep(direction)) {
+    displayController.stepAnimation(now, direction);
+  }
 }
 
-}  // namespace
+void updateOnboardActivityLed(uint32_t now) {
+  // A short pulse proves that the main loop is alive. Holding any electrically
+  // detected matrix key keeps the LED on continuously.
+  const bool isHeartbeatActive = now % kHeartbeatPeriodMs < kHeartbeatOnMs;
+  const bool isMatrixKeyActive = inputController.isRawKeyActive();
+  digitalWrite(
+      kOnboardLedPin, isHeartbeatActive || isMatrixKeyActive ? HIGH : LOW);
+}
+
+} // namespace
+
+void serviceKeyboardDuringDisplay() {
+  inputController.service(millis());
+}
 
 void setup() {
-  digitalWrite(kOnboardLedPin, LOW);
   pinMode(kOnboardLedPin, OUTPUT);
+  digitalWrite(kOnboardLedPin, HIGH);
 
-  for (uint32_t pin : kMatrixPins) {
-    pinMode(pin, INPUT);
-  }
-
-  showStartupIndicator();
+  // USB HID starts before the nonblocking OLED initialization.
+  inputController.begin();
+  displayController.begin(serviceKeyboardDuringDisplay);
+  digitalWrite(kOnboardLedPin, LOW);
 }
 
 void loop() {
-  for (uint32_t pin : kMatrixPins) {
-    flashOnboardLedTwice();
-    flashMatrixPin(pin);
+  const uint32_t now = millis();
+  inputController.service(now);
+  if (inputController.takeDisplayRecoveryRequest()) {
+    displayController.requestRecovery();
   }
+  applyPendingAnimationControl(now);
+  inputController.setInteractiveAnimation(
+      displayController.isInteractiveAnimation());
+  uint8_t animationKey;
+  bool isGameMode;
+  while (inputController.takeAnimationKey(animationKey, isGameMode)) {
+    displayController.onKeyPress(animationKey, isGameMode);
+  }
+  celebratePendingKeystrokeMilestone(now);
+  updateOnboardActivityLed(now);
+  displayController.render(now, currentDisplayStatus());
 }

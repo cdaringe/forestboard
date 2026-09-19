@@ -1,11 +1,38 @@
+Run the native firmware checks from the project root:
 
-This directory is intended for PlatformIO Test Runner and project tests.
+    test/host/run.sh
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+Requires GCC with C++17, AddressSanitizer, and UndefinedBehaviorSanitizer. The
+script creates a temporary build directory and removes it on exit. No connected
+keyboard or PlatformIO upload is needed.
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+The fixtures exercise the real keyboard, USB adapter, display controller,
+transport, shading, and animation code against narrow Arduino/USB/GFX mocks.
+Coverage includes physical mapping and existing Colemak-host translation,
+layout tap/hold and game capture, queued input across mode release, encoder
+backpressure and Consumer HID descriptors, nonblanking configuration refresh,
+reset recovery, animation pacing, and all three mountain-bike tricks. Shooting-star checks cover burst input without replacing active flights and
+launches from all four edges. Every
+registered animation is also advanced through phase wrap under sanitizers.
+
+Optionally export a mock-framebuffer bike image:
+
+    ERGOBOARD_BIKE_PREVIEW=/tmp/ergoboard-bike.pgm test/host/run.sh
+
+The preview mock draws geometry but does not rasterize text. Host tests do not
+measure panel FPS, electrical stability, USB enumeration on macOS, or Bluetooth
+volume behavior. Those require the assembled keyboard and host.
+
+Build the production and diagnostic firmware for both MCUs using the command
+in ARCHITECTURE.md. Its formatting instructions apply to the test fixtures too.
+
+support/ and src/hid/ below host/ provide the hardware stubs. host/inc/.gitkeep
+preserves the include directory used to mirror STM32duino's relative internal
+USB header path on a fresh checkout.
+
+Storage tests execute the real journal against a NOR-flash mock with fixed-address
+memory mapping on Linux. They cover the exact 10,000-key cadence, legacy migration,
+readback before commit, partially programmed slots, corrupt records, and power
+cuts before/during/after every erase and program step in either rollover direction.
+They also check normal append recovery and incomplete erases. The mock cannot
+replace electrical brownout testing on the physical STM32.
