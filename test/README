@@ -7,9 +7,9 @@ script creates a temporary build directory and removes it on exit. No connected
 keyboard or PlatformIO upload is needed.
 
 The fixtures exercise the real keyboard, USB adapter, display controller,
-transport, shading, and animation code against narrow Arduino/USB/GFX mocks.
+transport and animation code against narrow Arduino/USB/GFX mocks.
 Coverage includes physical mapping and existing Colemak-host translation,
-layout tap/hold and game capture, queued input across mode release, encoder
+layout tap/hold and game capture, menu-only Game mode control and queued input across mode changes, encoder
 backpressure and Consumer HID descriptors, nonblanking configuration refresh,
 reset recovery, animation pacing, and all three mountain-bike tricks. Shooting-star checks cover burst input without replacing active flights and
 launches from all four edges. Every
@@ -17,7 +17,7 @@ registered animation is also advanced through phase wrap under sanitizers.
 
 Optionally export a mock-framebuffer bike image:
 
-    ERGOBOARD_BIKE_PREVIEW=/tmp/ergoboard-bike.pgm test/host/run.sh
+    FORESTBOARD_BIKE_PREVIEW=/tmp/forestboard-bike.pgm test/host/run.sh
 
 The preview mock draws geometry but does not rasterize text. Host tests do not
 measure panel FPS, electrical stability, USB enumeration on macOS, or Bluetooth
@@ -36,3 +36,22 @@ readback before commit, partially programmed slots, corrupt records, and power
 cuts before/during/after every erase and program step in either rollover direction.
 They also check normal append recovery and incomplete erases. The mock cannot
 replace electrical brownout testing on the physical STM32.
+
+Settings checks cover knob and arrow navigation across pages, typed values and
+bounds/overflow, edit cancellation, host-input suppression, failed saves, and
+confirmed statistics resets. Persistence tests cut power before/during/after
+every programmed word and sector erase during append and rollover in both
+directions, for settings saves and count resets. They also verify legacy
+migration, zero-count snapshots, CRC/range/version rejection, future-version
+write protection, sequence exhaustion, and retention of settings at checkpoints.
+Bike geometry tests check a grounded rear tire, slope contact at the front tire,
+progressive pitch, lane isolation, and takeoff continuity.
+
+Per-animation checks cover physical bike bindings in both layouts, remapping and
+conflict rejection, wheelie rear-tire contact and ramp transitions, randomized
+ramps without keypresses, rider speed, and both tunnel speed/density controls.
+Separate tunnel fixtures test phase continuity and wrap at every speed extreme.
+Screen checks cover idle sleep, input wake-up, disabled/custom timeouts, held
+keys, timer rollover, and failed power-off retries.
+Storage checks retain v1/v2/v3 settings when migrating to the packed v4 format and
+reject duplicate/invalid bindings even with a valid CRC.

@@ -21,10 +21,26 @@ struct JournalRecord {
 };
 static_assert(sizeof(JournalRecord) == 16, "Journal records are four words");
 
+constexpr uint32_t kSnapshotMagic =
+    0x43464731; // CFG1: count + full configuration.
+constexpr uint32_t kSnapshotVersion = 4;
+constexpr uint32_t kSnapshotSize = 64;
+static_assert(
+    kSettingCount == 22, "Change journal version when changing the schema");
+// Version 3 packs bounded settings into 16-bit slots, retaining the same
+// 64-byte record size and CRC coverage so older firmware detects a future
+// version.
+static_assert(kSettingCount <= 22, "Snapshot settings capacity exceeded");
+struct Snapshot {
+  uint32_t words[kSnapshotSize / sizeof(uint32_t)];
+};
+
 struct SectorScan {
   uint32_t nextAddress;
   uint32_t sequence = 0;
   uint32_t count = 0;
+  Configuration configuration;
+  bool hasFutureVersion = false;
 };
 
 uint32_t sectorStart(uint8_t sector) {
@@ -95,6 +111,61 @@ bool isNewer(const JournalRecord& record, const SectorScan& scan) {
   return record.keystrokeCount > scan.count;
 }
 
+Snapshot readSnapshot(uint32_t address) {
+  Snapshot snapshot{};
+  const auto* source = reinterpret_cast<const volatile uint32_t*>(address);
+  for (size_t i = 0; i < 16; ++i) {
+    snapshot.words[i] = source[i];
+  }
+  return snapshot;
+}
+
+uint32_t snapshotChecksum(const Snapshot& snapshot) {
+  uint32_t crc = 0xFFFFFFFFU;
+  for (size_t i = 0; i < 16; ++i) {
+    if (i != 3) {
+      crc = updateCrc32(crc, snapshot.words[i]);
+    }
+  }
+  return ~crc;
+}
+
+bool decodeSnapshot(const Snapshot& snapshot, Configuration& config) {
+  const uint32_t version = snapshot.words[4];
+  if (snapshot.words[0] != kSnapshotMagic || snapshot.words[1] == 0 ||
+      version < 1 || version > kSnapshotVersion ||
+      snapshot.words[3] != snapshotChecksum(snapshot)) {
+    return false;
+  }
+  config = Configuration{};
+  const size_t storedSettingCount = version == 1 ? 7
+      : version == 2                             ? 8
+      : version == 3                             ? 21
+                                                 : kSettingCount;
+  for (size_t i = 0; i < storedSettingCount; ++i) {
+    const uint32_t value = version < 3
+        ? snapshot.words[5 + i]
+        : (snapshot.words[5 + i / 2] >> ((i % 2) * 16)) & 0xffffU;
+    if (!config.set(static_cast<Setting>(i), value)) {
+      return false;
+    }
+  }
+  if (version < 3) {
+    for (size_t i = 5 + storedSettingCount; i < 16; ++i) {
+      if (snapshot.words[i] != 0) {
+        return false;
+      }
+    }
+  } else {
+    for (size_t i = storedSettingCount; i < 22; ++i) {
+      if (((snapshot.words[5 + i / 2] >> ((i % 2) * 16)) & 0xffffU) != 0) {
+        return false;
+      }
+    }
+  }
+  return config.isValid();
+}
+
 SectorScan scanSector(uint8_t sector) {
   SectorScan scan{sectorStart(sector)};
   for (uint32_t address = sectorStart(sector); address < sectorEnd(sector);
@@ -103,9 +174,27 @@ SectorScan scanSector(uint8_t sector) {
     if (!isErased(record)) {
       scan.nextAddress = address + sizeof(JournalRecord);
     }
-    if (isValid(record) && isNewer(record, scan)) {
+    if (record.magic == kSnapshotMagic &&
+        address + kSnapshotSize <= sectorEnd(sector)) {
+      const Snapshot snapshot = readSnapshot(address);
+      if (snapshot.words[4] > kSnapshotVersion &&
+          snapshot.words[3] == snapshotChecksum(snapshot)) {
+        scan.hasFutureVersion = true;
+      }
+      Configuration config;
+      if (decodeSnapshot(snapshot, config)) {
+        if (isNewer(record, scan)) {
+          scan.sequence = record.sequence;
+          scan.count = record.keystrokeCount;
+          scan.configuration = config;
+        }
+        scan.nextAddress = address + kSnapshotSize;
+        address += kSnapshotSize - sizeof(JournalRecord);
+      }
+    } else if (isValid(record) && isNewer(record, scan)) {
       scan.sequence = record.sequence;
       scan.count = record.keystrokeCount;
+      scan.configuration = Configuration{};
     }
   }
   return scan;
@@ -140,30 +229,51 @@ bool programWord(uint32_t address, uint32_t value) {
   return result == HAL_OK;
 }
 
-bool isPayloadVerified(uint32_t address, const JournalRecord& expected) {
-  const JournalRecord actual = readRecord(address);
-  return actual.magic == UINT32_MAX && actual.sequence == expected.sequence &&
-      actual.keystrokeCount == expected.keystrokeCount &&
-      actual.checksum == expected.checksum;
-}
-
-bool appendJournalRecord(uint32_t address, uint32_t sequence, uint32_t count) {
-  if (!isErased(readRecord(address))) {
+bool appendSnapshot(uint32_t address, uint32_t sequence, uint32_t count,
+    const Configuration& config) {
+  Snapshot snapshot{};
+  snapshot.words[0] = kSnapshotMagic;
+  snapshot.words[1] = sequence;
+  snapshot.words[2] = count;
+  snapshot.words[4] = kSnapshotVersion;
+  for (size_t i = 0; i < kSettingCount; ++i) {
+    snapshot.words[5 + i / 2] |= config.get(static_cast<Setting>(i))
+        << ((i % 2) * 16);
+  }
+  snapshot.words[3] = snapshotChecksum(snapshot);
+  const Snapshot erased = readSnapshot(address);
+  for (uint32_t word : erased.words) {
+    if (word != UINT32_MAX) {
+      return false;
+    }
+  }
+  for (size_t i = 1; i < 16; ++i) {
+    if (!programWord(address + i * 4, snapshot.words[i])) {
+      return false;
+    }
+  }
+  const Snapshot payload = readSnapshot(address);
+  if (payload.words[0] != UINT32_MAX) {
     return false;
   }
-  JournalRecord record{kJournalMagic, sequence, count, 0};
-  record.checksum = recordChecksum(record);
-  const bool isWritten = programWord(address + 4, sequence) &&
-      programWord(address + 8, count) &&
-      programWord(address + 12, record.checksum);
-  if (!isWritten || !isPayloadVerified(address, record)) {
+  for (size_t i = 1; i < 16; ++i) {
+    if (payload.words[i] != snapshot.words[i]) {
+      return false;
+    }
+  }
+  // Publish only after the complete versioned payload is read back.
+  programWord(address, kSnapshotMagic);
+  const Snapshot committed = readSnapshot(address);
+  Configuration decoded;
+  if (!decodeSnapshot(committed, decoded)) {
     return false;
   }
-  // Promotion is the final word. No separate mutable active-sector pointer.
-  programWord(address, kJournalMagic);
-  const JournalRecord committed = readRecord(address);
-  return isValid(committed) && committed.sequence == sequence &&
-      committed.keystrokeCount == count;
+  for (size_t i = 0; i < 16; ++i) {
+    if (committed.words[i] != snapshot.words[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 } // namespace
@@ -177,6 +287,8 @@ void KeystrokeCounter::begin() {
   activeSector_ = isFirstNewer ? 0 : 1;
   const SectorScan& newest = isFirstNewer ? first : second;
   count_ = newest.count;
+  configuration_ = newest.configuration;
+  isStorageWritable_ = !first.hasFutureVersion && !second.hasFutureVersion;
   nextJournalSequence_ = newest.sequence + 1;
   nextJournalAddress_ = newest.nextAddress;
   pendingMilestone_ = 0;
@@ -222,33 +334,78 @@ bool KeystrokeCounter::isCheckpointDue(uint32_t count) {
   return count != 0 && count % kCheckpointInterval == 0;
 }
 
-void KeystrokeCounter::writeCheckpoint() {
-  const bool isRollover = nextJournalAddress_ >= sectorEnd(activeSector_);
+bool KeystrokeCounter::writeCheckpoint() {
+  if (nextJournalSequence_ == 0) {
+    return false; // Never wrap the journal sequence.
+  }
+  const bool isRollover =
+      nextJournalAddress_ + kSnapshotSize > sectorEnd(activeSector_);
   const uint8_t targetSector = isRollover ? 1 - activeSector_ : activeSector_;
   if (isRollover && !eraseSector(targetSector)) {
-    return;
+    return false;
   }
   const uint32_t address =
       isRollover ? sectorStart(targetSector) : nextJournalAddress_;
   // A failed program can still change bits. Never retry that slot in place.
   if (!isRollover) {
-    nextJournalAddress_ += sizeof(JournalRecord);
+    nextJournalAddress_ += kSnapshotSize;
   }
-  if (!appendJournalRecord(address, nextJournalSequence_, count_)) {
-    return;
+  if (!appendSnapshot(address, nextJournalSequence_, count_, configuration_)) {
+    return false;
   }
   activeSector_ = targetSector;
-  nextJournalAddress_ = address + sizeof(JournalRecord);
+  nextJournalAddress_ = address + kSnapshotSize;
   ++nextJournalSequence_;
   // Retain the previous sector until it is needed for the next rollover.
+  return true;
 }
 
-void KeystrokeCounter::checkpoint() {
+bool KeystrokeCounter::checkpoint() {
+  if (!isStorageWritable_) {
+    return false;
+  }
   if (HAL_FLASH_Unlock() != HAL_OK) {
-    return;
+    return false;
   }
   __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
       FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
-  writeCheckpoint();
+  const bool success = writeCheckpoint();
   HAL_FLASH_Lock();
+  return success;
+}
+
+bool KeystrokeCounter::saveConfiguration(const Configuration& value) {
+  if (!value.isValid()) {
+    return false;
+  }
+  if (!isStorageWritable_) {
+    return false;
+  }
+  if (value == configuration_) {
+    return true;
+  }
+  const Configuration previous = configuration_;
+  configuration_ = value;
+  if (checkpoint()) {
+    return true;
+  }
+  configuration_ = previous;
+  return false;
+}
+
+bool KeystrokeCounter::resetStats() {
+  if (!isStorageWritable_) {
+    return false;
+  }
+  if (count_ == 0) {
+    return true;
+  }
+  const uint32_t previousCount = count_;
+  count_ = 0;
+  if (!checkpoint()) {
+    count_ = previousCount;
+    return false;
+  }
+  pendingMilestone_ = 0;
+  return true;
 }

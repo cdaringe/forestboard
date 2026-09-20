@@ -44,8 +44,8 @@ public:
     display.drawCircle(64, 65, radius, SH110X_WHITE);
     display.setTextColor(SH110X_WHITE);
     display.setTextSize(1);
-    display.setCursor(38, 5);
-    display.print("ERGOWIDE");
+    display.setCursor(31, 5);
+    display.print("forestboard");
 
     frame_ = clock_.frame();
   }

@@ -75,8 +75,9 @@ inline void pinMode(uint32_t, int) {}
 inline void digitalWrite(uint32_t pin, int value) {
   pinValues[pin] = value;
 }
-inline int digitalRead(uint32_t) {
-  return HIGH;
+inline int (*digitalReadOverride)(uint32_t) = nullptr;
+inline int digitalRead(uint32_t pin) {
+  return digitalReadOverride == nullptr ? HIGH : digitalReadOverride(pin);
 }
 template <class T, class L, class H> T constrain(T v, L l, H h) {
   return v < l ? l : v > h ? h : v;

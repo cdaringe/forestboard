@@ -11,7 +11,6 @@
 #include "display/display_controller.h"
 #include "keyboard/input_controller.h"
 #undef private
-#include "display/effects/oled_shading.h"
 
 static bool isConsumerBusy = false;
 static std::vector<uint8_t> consumerReports;
@@ -27,6 +26,22 @@ bool sendUsbConsumerReport(uint8_t b) {
   return true;
 }
 void KeystrokeCounter::begin() {}
+static bool failSettingsSave = false;
+bool KeystrokeCounter::resetStats() {
+  if (failSettingsSave) {
+    return false;
+  }
+  count_ = 0;
+  pendingMilestone_ = 0;
+  return true;
+}
+bool KeystrokeCounter::saveConfiguration(const Configuration& value) {
+  if (failSettingsSave) {
+    return false;
+  }
+  configuration_ = value;
+  return true;
+}
 void KeystrokeCounter::recordKeystroke() {
   ++count_;
 }
@@ -89,39 +104,474 @@ static void testPhysicalLayout() {
 }
 
 static void testGameMode() {
+  for (bool qwerty : {false, true}) {
+    applyConfiguration(Configuration{});
+    InputController input;
+    input.setInteractiveAnimation(true);
+    if (qwerty) {
+      input.toggleKeyboardLayout();
+    }
+    Configuration config;
+    config.set(Setting::gameMode, 1);
+    applyConfiguration(config);
+    const uint8_t actions[] = {bikeControls::backflip, bikeControls::cancan,
+        bikeControls::spin, bikeControls::wheelie, bikeControls::jump};
+    for (uint8_t i = 0; i < 5; ++i) {
+      // Physical ASDFG positions are Colemak ARSTD, independent of layout.
+      press(input, 3, 2 + i, 10 + i);
+      assert(!isReportContaining(input.activeUsageAt(3, 2 + i)));
+      uint8_t action;
+      bool game;
+      assert(
+          input.takeAnimationKey(action, game) && game && action == actions[i]);
+      release(input, 3, 2 + i);
+    }
+    press(input, 3, 9, 30); // Old J shortcut is no longer captured.
+    assert(isReportContaining(input.activeUsageAt(3, 9)));
+    uint8_t action;
+    bool game;
+    assert(!input.takeAnimationKey(
+        action, game)); // Unbound keys cannot trigger a trick by coincidence.
+    release(input, 3, 9);
+    press(input, 3, 2, 40);
+    config.set(Setting::gameMode, 0);
+    applyConfiguration(config);
+    input.sendReport();
+    assert(!isReportContaining(
+        input.activeUsageAt(3, 2))); // Capture lasts through release.
+    release(input, 3, 2);
+    press(input, 3, 2, 50);
+    assert(isReportContaining(input.activeUsageAt(3, 2)));
+    release(input, 3, 2);
+  }
+  applyConfiguration(Configuration{});
+}
+
+static void chooseSetting(SettingsMenu& menu, Setting setting) {
+  assert(menu.page_ == SettingsMenu::Page::Root);
+  const auto group = settingDefinitions[static_cast<size_t>(setting)].group;
+  const size_t groupIndex = group == SettingGroup::Display ? 0
+      : group == SettingGroup::Keyboard                    ? 1
+                                                           : 3;
+  while (menu.selected_ != groupIndex) {
+    menu.key(hid::DOWN);
+  }
+  menu.key(hid::RIGHT);
+  if (groupIndex == 3) {
+    const size_t animationIndex = group == SettingGroup::MountainBike ? 0
+        : group == SettingGroup::WarpTunnel                           ? 1
+                                                                      : 2;
+    while (menu.selected_ != animationIndex) {
+      menu.key(hid::DOWN);
+    }
+    menu.key(hid::RIGHT);
+  }
+  while (menu.groupSetting(menu.selected_) != setting) {
+    menu.key(hid::DOWN);
+  }
+  menu.key(hid::ENTER);
+}
+static void requestMenuSave(SettingsMenu& menu) {
+  while (menu.page_ != SettingsMenu::Page::Root) {
+    menu.key(hid::LEFT);
+  }
+  while (menu.selected_ != 4) {
+    menu.key(hid::DOWN);
+  }
+  menu.select();
+}
+static void typeNumber(SettingsMenu& menu, const char* digits) {
+  for (; *digits; ++digits) {
+    menu.key(*digits == '0' ? 0x27 : 0x1e + *digits - '1');
+  }
+}
+
+static void testSettingsMenu() {
+  applyConfiguration(Configuration{});
   InputController k;
   press(k, 8, 4, 0);
   release(k, 8, 4);
-  // Held toggle enters GAME, captures only controls, and does not toggle on up.
-  uint8_t queuedUsage;
-  bool isQueuedGameMode;
-  while (k.takeAnimationKey(queuedUsage, isQueuedGameMode)) {
-  }
-  k.setInteractiveAnimation(true);
+  assert(strcmp(k.layoutBadgeLabel(), "QTY") == 0);
   press(k, 8, 4, 100);
-  k.rawChangedAt_[8][4] = 451;
-  k.service(451);
-  assert(k.isGameModeActive());
-  press(k, 3, 9, 460);
-  assert(!isReportContaining(hid::Y)); // J maps to Y in QTY mode.
+  k.updateSettingsMenu(449);
+  assert(!k.settingsMenu().isOpen());
+  k.updateSettingsMenu(450);
+  assert(k.settingsMenu().isOpen() && !k.isGameModeActive());
+  k.updateSettingsMenu(900);
   release(k, 8, 4);
-  assert(!k.isGameModeActive());
-  // A mode release before display dispatch must preserve the captured action.
-  assert(k.takeAnimationKey(queuedUsage, isQueuedGameMode));
-  assert(queuedUsage == hid::J && isQueuedGameMode);
-  assert(strcmp(k.layoutBadgeLabel(), "QTY") == 0);
-  k.sendReport();
-  assert(!isReportContaining(hid::Y)); // Held control stays captured.
-  release(k, 3, 9);
-  press(k, 3, 9, 470);
-  assert(isReportContaining(hid::Y));
-  release(k, 3, 9);
-  press(k, 11, 10, 480);
-  press(k, 8, 4, 490);
-  assert(k.takeDisplayRecoveryRequest());
+  assert(k.settingsMenu().isOpen() && strcmp(k.layoutBadgeLabel(), "QTY") == 0);
+  const uint32_t count = k.keystrokeCount();
+  press(k, 1, 1, 910);
+  assert(!isReportContaining(k.activeUsageAt(1, 1)));
+  assert(
+      k.keystrokeCount() == count); // Menu navigation is not typing statistics.
+  uint8_t usage;
+  bool game;
+  assert(!k.takeAnimationKey(usage, game));
+  release(k, 1, 1);
+  auto& menu = k.settingsMenu_;
+  chooseSetting(menu, Setting::fps);
+  typeNumber(menu, "0");
+  menu.select();
+  assert(menu.page_ == SettingsMenu::Page::Edit &&
+      strcmp(menu.message_, "Outside range") == 0);
+  menu.key(0x2a);
+  typeNumber(menu, "121");
+  menu.select();
+  assert(menu.page_ == SettingsMenu::Page::Edit && menu.draft().fps() == 60);
+  menu.key(0x2a);
+  menu.key(0x2a);
+  menu.key(0x2a);
+  typeNumber(menu, "90");
+  menu.select();
+  assert(menu.draft().fps() == 90 && configuration().fps() == 60);
+  k.queueEncoderStep(1); // Next display setting: animation delay.
+  assert(menu.groupSetting(menu.selected_) == Setting::animationSeconds &&
+      k.pendingEncoderSteps_ == 0);
+  press(k, kMuteKeyPosition.row, kMuteKeyPosition.col, 1000);
+  assert(menu.page_ == SettingsMenu::Page::Edit && k.consumerButtons(0) == 0);
+  release(k, kMuteKeyPosition.row, kMuteKeyPosition.col);
+  k.queueEncoderStep(1);
+  assert(menu.draft().animationSeconds() == 310);
+  menu.select();
+  requestMenuSave(menu);
+  failSettingsSave = true;
+  k.serviceSettings();
+  assert(menu.isOpen() && configuration().fps() == 60);
+  failSettingsSave = false;
+  menu.select();
+  k.serviceSettings();
+  assert(!menu.isOpen() && configuration().fps() == 90 &&
+      configuration().animationSeconds() == 310);
+  menu.open();
+  chooseSetting(menu, Setting::fps);
+  menu.rotate(1);
+  menu.key(hid::ESC); // Back cancels this value's knob edits.
+  assert(menu.draft().fps() == 90);
+  menu.key(hid::ENTER);
+  typeNumber(menu, "30");
+  menu.select();
+  menu.key(hid::LEFT);
+  menu.key(hid::ESC); // Cancel draft at root.
+  assert(!menu.isOpen() && configuration().fps() == 90);
+  menu.open();
+  press(k, 0, 1, 1100); // Escape at root closes menu.
+  assert(!menu.isOpen() && !isReportContaining(hid::ESC));
+  release(k, 0, 1);
+  press(k, 0, 1, 1110);
+  assert(isReportContaining(hid::ESC));
+  release(k, 0, 1);
+  press(k, 11, 10, 1200);
+  press(k, 8, 4, 1210);
+  k.updateSettingsMenu(1600);
+  assert(k.takeDisplayRecoveryRequest() && !menu.isOpen());
+  release(k, 8, 4);
   release(k, 11, 10);
-  release(k, 8, 4);
-  assert(strcmp(k.layoutBadgeLabel(), "QTY") == 0);
+  applyConfiguration(Configuration{});
+}
+
+static void testMenuOwnsGameMode() {
+  applyConfiguration(Configuration{});
+  InputController input;
+  press(input, 8, 4, 0);
+  input.updateSettingsMenu(350);
+  assert(input.settingsMenu().isOpen() && !input.isGameModeActive());
+  release(input, 8, 4);
+  auto& menu = input.settingsMenu_;
+  chooseSetting(menu, Setting::gameMode);
+  typeNumber(menu, "1");
+  menu.select();
+  assert(!input.isGameModeActive()); // Draft not applied until saved.
+  requestMenuSave(menu);
+  input.serviceSettings();
+  assert(input.isGameModeActive() && !menu.isOpen());
+  press(input, 8, 4, 1000);
+  input.updateSettingsMenu(1350);
+  release(input, 8, 4);
+  assert(input.isGameModeActive()); // Layer hold never toggles Game mode.
+  chooseSetting(menu, Setting::gameMode);
+  typeNumber(menu, "0");
+  menu.select();
+  requestMenuSave(menu);
+  input.serviceSettings();
+  assert(!input.isGameModeActive() && !menu.isOpen());
+  applyConfiguration(Configuration{});
+}
+
+static void testResetStatsConfirmation() {
+  InputController input;
+  input.keystrokeCounter_.count_ = 12345;
+  auto& menu = input.settingsMenu_;
+  menu.open();
+  menu.key(hid::DOWN);
+  menu.key(hid::DOWN);
+  menu.key(hid::RIGHT);
+  assert(menu.page_ == SettingsMenu::Page::Statistics);
+  menu.select();
+  input.serviceSettings();
+  assert(menu.page_ == SettingsMenu::Page::ConfirmReset && menu.selected_ == 0);
+  assert(input.keystrokeCount() == 12345 && !menu.resetRequested());
+  menu.select(); // Default Cancel must never erase statistics.
+  assert(menu.page_ == SettingsMenu::Page::Statistics &&
+      input.keystrokeCount() == 12345);
+  menu.select();
+  menu.key(hid::DOWN);
+  menu.select();
+  failSettingsSave = true;
+  input.serviceSettings();
+  assert(input.keystrokeCount() == 12345 && menu.isOpen());
+  failSettingsSave = false;
+  menu.select();
+  menu.key(hid::DOWN);
+  menu.select();
+  input.serviceSettings();
+  assert(input.keystrokeCount() == 0 && menu.count_ == 0);
+  assert(menu.page_ == SettingsMenu::Page::Statistics);
+}
+
+static void testConfigurationLimits() {
+  Configuration config;
+  for (size_t i = 0; i < kSettingCount; ++i) {
+    auto key = static_cast<Setting>(i);
+    const auto& def = settingDefinitions[i];
+    assert(config.get(key) == def.initial);
+    assert(!config.set(key, def.maximum + 1));
+    if (def.minimum) {
+      assert(!config.set(key, def.minimum - 1));
+    }
+    assert(config.set(key, def.minimum));
+    assert(config.set(key, def.maximum));
+  }
+  assert(!config.set(Setting::Count, 1));
+  assert(config.frameIntervalMs() == 9);
+  config.set(Setting::fps, 60);
+  assert(config.frameIntervalMs() == 17);
+  SettingsMenu menu;
+  menu.open();
+  chooseSetting(menu, Setting::fps);
+  for (int i = 0; i < 200; ++i) {
+    menu.rotate(1);
+  }
+  assert(menu.draft().fps() == 120);
+  for (int i = 0; i < 200; ++i) {
+    menu.rotate(-1);
+  }
+  assert(menu.draft().fps() == 20);
+  typeNumber(menu, "999999999999999999999999");
+  menu.select();
+  assert(menu.page_ == SettingsMenu::Page::Edit && menu.draft().fps() == 20);
+  menu.key(hid::ESC);
+  assert(menu.draft().fps() == configuration().fps());
+}
+
+static void testAnimationSettingsAndPhysicalBindingEditor() {
+  applyConfiguration(Configuration{});
+  InputController input;
+  auto& menu = input.settingsMenu_;
+  menu.open();
+  chooseSetting(menu, Setting::mtbSpeed);
+  typeNumber(menu, "95");
+  menu.select();
+  menu.key(hid::LEFT);
+  menu.key(hid::LEFT);
+  assert(menu.page_ == SettingsMenu::Page::Root);
+  chooseSetting(menu, Setting::warpSpeed);
+  typeNumber(menu, "200");
+  menu.select();
+  menu.key(hid::LEFT);
+  menu.key(hid::LEFT);
+  chooseSetting(menu, Setting::curvedRings);
+  typeNumber(menu, "12");
+  menu.select();
+  menu.key(hid::LEFT);
+  menu.key(hid::LEFT);
+  chooseSetting(menu, Setting::mtbWheelieKey);
+  assert(menu.isBindingEditor());
+  press(input, 2, 7, 100); // Physical QWERTY Y is logical J in Colemak.
+  assert(menu.draft().mtbWheelieKey() == hid::Y);
+  assert(!isReportContaining(hid::Y));
+  menu.select();
+  requestMenuSave(menu);
+  input.serviceSettings();
+  assert(
+      configuration().mtbSpeed() == 95 && configuration().warpSpeed() == 200);
+  assert(configuration().curvedRings() == 12 &&
+      configuration().mtbWheelieKey() == hid::Y);
+  assert(!isReportContaining(
+      hid::Y)); // The binding key stays suppressed through exit.
+  release(input, 2, 7);
+  Configuration config = configuration();
+  config.set(Setting::gameMode, 1);
+  applyConfiguration(config);
+  input.setInteractiveAnimation(true);
+  for (unsigned layout = 0; layout < 2; ++layout) {
+    press(input, 2, 7, 200 + layout);
+    uint8_t action;
+    bool game;
+    assert(input.takeAnimationKey(action, game) &&
+        action == bikeControls::wheelie && game);
+    assert(!isReportContaining(input.activeUsageAt(2, 7)));
+    release(input, 2, 7);
+    press(input, 3, 5, 300 + layout); // Former wheelie physical key now types.
+    assert(isReportContaining(input.activeUsageAt(3, 5)));
+    assert(!input.takeAnimationKey(action, game));
+    release(input, 3, 5);
+    input.toggleKeyboardLayout();
+  }
+  menu.open();
+  chooseSetting(menu, Setting::mtbWheelieKey);
+  menu.key(hid::A, hid::A);
+  menu.select(); // Duplicate backflip binding.
+  requestMenuSave(menu);
+  assert(!menu.saveRequested() && menu.isOpen());
+  assert(strcmp(menu.message_, "Keys must be unique") == 0);
+  menu.key(hid::ESC);
+  assert(configuration().mtbWheelieKey() == hid::Y);
+  menu.open();
+  chooseSetting(menu, Setting::mtbWheelieKey);
+  menu.key(hid::LEFT, hid::LEFT); // Arrow keys can themselves be bound.
+  assert(menu.draft().mtbWheelieKey() == hid::LEFT && menu.isBindingEditor());
+  menu.key(hid::ESC); // Only Escape cancels a key-binding edit.
+  assert(menu.draft().mtbWheelieKey() == hid::Y);
+  applyConfiguration(Configuration{});
+}
+
+static void testBikeRandomJumpsAndSpeed() {
+  Adafruit_SH1107 screen;
+  Configuration config;
+  MountainBikeAnimation bike;
+  applyConfiguration(config);
+  bike.reset();
+  bike.render(screen, 0);
+  for (uint32_t now = 20; now <= 10000; now += 20) {
+    bike.render(screen, now);
+  }
+  for (const auto& ramp : bike.jumps_) {
+    assert(!ramp.isActive); // No automatic game ramps in ambient mode.
+  }
+  config.set(Setting::gameMode, 1);
+  applyConfiguration(config);
+  unsigned spawns = 0, launches = 0;
+  bool laneSeen[3] = {};
+  float firstDelay = 0;
+  bool variedDelay = false;
+  for (uint32_t now = 10020; now <= 30000; now += 20) {
+    const bool airborne = bike.isAirborne_;
+    bike.render(screen, now);
+    if (!airborne && bike.isAirborne_) {
+      ++launches;
+    }
+    for (const auto& ramp : bike.jumps_) {
+      if (ramp.isActive && ramp.x == 124) {
+        ++spawns;
+        laneSeen[ramp.lane] = true;
+        if (firstDelay == 0) {
+          firstDelay = bike.randomJumpRemainingMs_;
+        } else {
+          variedDelay |= bike.randomJumpRemainingMs_ != firstDelay;
+        }
+        assert(bike.randomJumpRemainingMs_ >= 1200 &&
+            bike.randomJumpRemainingMs_ <= 2000);
+      }
+    }
+  }
+  assert(spawns >= 9 && launches >= 3 && variedDelay);
+  assert(laneSeen[1] && (laneSeen[0] || laneSeen[2]));
+  auto countSpawns = [&](uint32_t gap) {
+    config.set(Setting::mtbJumpIntervalMs, gap);
+    applyConfiguration(config);
+    bike.reset();
+    unsigned total = 0;
+    for (uint32_t now = 0; now <= 20000; now += 20) {
+      bike.render(screen, now);
+      for (const auto& ramp : bike.jumps_) {
+        if (ramp.isActive && ramp.x == 124) {
+          ++total;
+        }
+      }
+    }
+    return total;
+  };
+  assert(countSpawns(800) > countSpawns(4000));
+  config.set(Setting::gameMode, 0);
+  config.set(Setting::mtbSpeed, 100);
+  applyConfiguration(config);
+  bike.reset();
+  bike.render(screen, 0);
+  bike.onKeyPress(kJ, true);
+  bike.render(screen, 50);
+  assert(fabsf(bike.scroll_ - 5) < 0.001f &&
+      fabsf(bike.jumps_[0].x - 119) < 0.001f);
+  applyConfiguration(Configuration{});
+}
+
+static void testBikeWheelies() {
+  applyConfiguration(Configuration{});
+  Adafruit_SH1107 screen;
+  MountainBikeAnimation bike;
+  bike.reset();
+  bike.render(screen, 0);
+  bike.onKeyPress(kWheelie, true);
+  float previous = 0;
+  for (unsigned now = 20; now <= 600; now += 20) {
+    bike.render(screen, now);
+    const float rise = bike.frontWheelRise();
+    assert(rise >= previous && !bike.isAirborne_);
+    const RiderPose pose(75, Trick::None, 0, rise);
+    const Point rear = pose.project({-8, 0});
+    assert(rear.x == 24 && rear.y == 75);
+    previous = rise;
+  }
+  assert(bike.frontWheelRise() > 8.9f && bike.isWheelieActive_);
+  bike.onKeyPress(kWheelie, true);
+  assert(bike.wheelieStartedAt_ ==
+      0); // Repeated presses do not postpone completion.
+  for (unsigned now = 620; now <= 1200; now += 20) {
+    bike.render(screen, now);
+  }
+  assert(!bike.isWheelieActive_ && bike.frontWheelRise() == 0 &&
+      bike.landedTricks_ == 1);
+  bike.onKeyPress(kWheelie, true);
+  bike.render(screen, 1800);
+  bike.jumps_[0] = {38, 1, true};
+  bike.advanceJumps(0.01f);
+  assert(bike.isAirborne_ && !bike.isWheelieActive_);
+  assert(bike.frontWheelRise() >
+      8.9f); // Wheelie pitch is carried into ramp takeoff.
+  bike.onKeyPress(kWheelie, true);
+  assert(!bike.isWheelieActive_); // Wheelies only begin on the ground.
+  bike.reset();
+  bike.onKeyPress(kWheelie, true);
+  bike.render(screen, 50000);
+  assert(bike.isWheelieActive_ && bike.wheelieStartedAt_ == 50000);
+}
+
+static void testBikeRampApproach() {
+  MountainBikeAnimation bike;
+  bike.reset();
+  bike.jumps_[0] = {60, 1, true};
+  assert(bike.frontWheelRise() == 0);
+  float previous = 0;
+  for (float x : {52.0f, 49.0f, 46.0f, 43.0f, 40.0f, 38.0f}) {
+    bike.jumps_[0].x = x;
+    const float rise = bike.frontWheelRise();
+    assert(rise >= previous && rise <= 8);
+    const RiderPose pose(75, Trick::None, 0, rise);
+    const Point rear = pose.project({-8, 0});
+    const Point front = pose.project({8, 0});
+    assert(rear.x == 24 && rear.y == 75); // Rear tire stays on flat ground.
+    const float surfaceY = 79 - (front.x - (x - 12)) * 8 / 12;
+    assert(fabsf(front.y + 4 - surfaceY) <= 1); // Front tire climbs slope.
+    assert(front.y <= rear.y);
+    previous = rise;
+  }
+  bike.jumps_[0].lane = 0;
+  assert(bike.frontWheelRise() == 0); // No pitching for another lane's ramp.
+  bike.jumps_[0].lane = 1;
+  bike.advanceJumps(0.01f);
+  assert(bike.isAirborne_ && bike.frontWheelRise() == 8);
+  bike.now_ += 250;
+  assert(bike.frontWheelRise() == 0);
 }
 
 static void testConsumerReports() {
@@ -220,7 +670,7 @@ static void testAnimationStress() {
 
 static void exportBikePreview() {
   Adafruit_SH1107 screen;
-  if (const char* path = getenv("ERGOBOARD_BIKE_PREVIEW")) {
+  if (const char* path = getenv("FORESTBOARD_BIKE_PREVIEW")) {
     MountainBikeAnimation bike;
     bike.reset();
     bike.render(screen, 0);
@@ -234,7 +684,6 @@ static void exportBikePreview() {
     for (unsigned end = now + 250; now < end; now += 8) {
       bike.render(screen, now);
     }
-    applyOledShading(screen);
     FILE* out = fopen(path, "wb");
     assert(out);
     fprintf(out, "P5\n128 128\n255\n");
@@ -246,6 +695,49 @@ static void exportBikePreview() {
     }
     fclose(out);
   }
+}
+
+static void testRuntimeDisplaySettings() {
+  Configuration config;
+  applyConfiguration(config);
+  DisplayController display;
+  display.isReady_ = true;
+  display.configuredContrast_ = config.contrast();
+  assert(!display.isFrameDue(16) && display.isFrameDue(17));
+  config.set(Setting::fps, 20);
+  config.set(Setting::animationSeconds, 10);
+  config.set(Setting::refreshSeconds, 120);
+  applyConfiguration(config);
+  assert(!display.isFrameDue(49) && display.isFrameDue(50));
+  assert(!display.isConfigurationRefreshDue(119999));
+  assert(display.isConfigurationRefreshDue(120000));
+  const auto index = display.animationManager_.currentIndex();
+  display.rotateAnimationWhenDue(9999);
+  assert(display.animationManager_.currentIndex() == index);
+  display.rotateAnimationWhenDue(10000);
+  assert(display.animationManager_.currentIndex() != index);
+  config.set(Setting::contrast, 120);
+  applyConfiguration(config);
+  assert(display.isConfigurationRefreshDue(1));
+  oledCommands.clear();
+  display.refreshConfiguration(1);
+  bool foundContrast = false;
+  for (const auto& command : oledCommands) {
+    for (size_t i = 0; i + 1 < command.size(); ++i) {
+      if (command[i] == 0x81 && command[i + 1] == 120) {
+        foundContrast = true;
+      }
+    }
+  }
+  assert(foundContrast && !display.isConfigurationRefreshDue(2));
+  SettingsMenu menu;
+  menu.open();
+  DisplayStatus status = {
+      "CMK", "", 0, false, false, false, false, false, &menu};
+  display.renderScene(10, status);
+  assert(display.display_.getBuffer()[3] != 0 ||
+      display.display_.getBuffer()[1 + 2 * 128] != 0);
+  applyConfiguration(Configuration{});
 }
 
 static void testDisplayRecovery() {
@@ -266,6 +758,14 @@ static void testDisplayRecovery() {
   oledCommands.clear();
   fakeNow = 2100;
   display.render(fakeNow, status);
+  assert(display.lastRefreshAt_ == 0);
+  fakeNow = 59980;
+  display.render(fakeNow, status);
+  assert(display.lastRefreshAt_ == 0);
+  oledCommands.clear();
+  fakeNow = 60000;
+  display.render(fakeNow, status);
+  assert(display.lastRefreshAt_ == 60000);
   for (const auto& command : oledCommands) {
     for (auto byte : command) {
       assert(byte != 0xAE && byte != 0xA5);
@@ -273,34 +773,257 @@ static void testDisplayRecovery() {
   }
   display.animationManager_.select(9);
   display.requestRecovery();
-  fakeNow = 2110;
+  fakeNow = 60010;
   display.render(fakeNow, status);
   assert(
       display.isRecovering_ && display.animationManager_.currentIndex() == 9);
-  fakeNow = 2210;
+  fakeNow = 60110;
   display.render(fakeNow, status);
   assert(!display.isRecovering_);
   failOled = true;
-  fakeNow = 2220;
+  fakeNow = 60130;
   display.render(fakeNow, status);
   assert(display.isRecoveryRequested_);
   failOled = false;
-  fakeNow = 2230;
+  fakeNow = 60140;
   display.render(fakeNow, status);
   assert(display.isRecovering_);
 }
 
-static void testShading() {
-  Adafruit_SH1107 screen;
-  // Shading preserves isolated highlights and texture stays within framebuffer.
-  screen.clearDisplay();
-  screen.drawPixel(64, 64, 1);
-  applyOledShading(screen);
-  assert(screen.getBuffer()[64 + 8 * 128] & 1);
-  for (unsigned i = 0; i < 2048; ++i) {
-    screen.getBuffer()[i] = static_cast<uint8_t>(i * 31);
+static void testScreenTimeout() {
+  applyConfiguration(Configuration{});
+  DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
+  for (uint32_t start : {0U, UINT32_MAX - 1000U}) {
+    DisplayController display;
+    fakeNow = start;
+    display.begin(serviceInput);
+    auto renderAt = [&](uint32_t elapsed) {
+      fakeNow = start + elapsed;
+      display.render(fakeNow, status);
+    };
+    renderAt(100);
+    renderAt(299999);
+    assert(!display.isPoweredOff_);
+    const auto frames = pageWrites;
+    oledCommands.clear();
+    renderAt(300000);
+    assert(display.isPoweredOff_ && pageWrites == frames);
+    assert(oledCommands == std::vector<std::vector<uint8_t>>{{0xAE}});
+    display.requestRecovery();
+    renderAt(600000);
+    renderAt(0); // Even a full clock wrap must leave the panel asleep.
+    assert(display.isPoweredOff_ && pageWrites == frames);
+    assert(oledCommands.size() == 1);
+    display.onActivity(start + 600001);
+    renderAt(600001);
+    renderAt(600101);
+    assert(!display.isPoweredOff_ && pageWrites == frames + 16);
+    assert(oledCommands.back() == std::vector<uint8_t>{0xAF});
+    renderAt(900000);
+    assert(!display.isPoweredOff_);
+    renderAt(900001);
+    assert(display.isPoweredOff_);
+    display.onActivity(start + 900002);
+    renderAt(900002);
+    assert(!display.isPoweredOff_);
+    assert(oledCommands.back() == std::vector<uint8_t>{0xAF});
   }
-  applyOledShading(screen);
+
+  // Editing and saving uses the same menu/persistence path as other settings.
+  InputController input;
+  auto& menu = input.settingsMenu_;
+  menu.open();
+  chooseSetting(menu, Setting::idleSeconds);
+  typeNumber(menu, "60");
+  menu.select();
+  requestMenuSave(menu);
+  input.serviceSettings();
+  assert(configuration().idleSeconds() == 60);
+  DisplayController display;
+  fakeNow = 0;
+  display.begin(serviceInput);
+  fakeNow = 100;
+  display.render(fakeNow, status);
+  fakeNow = 60000;
+  failOled = true;
+  display.render(fakeNow, status);
+  assert(!display.isPoweredOff_);
+  failOled = false;
+  display.render(fakeNow, status);
+  assert(display.isPoweredOff_); // Failed off commands retry.
+
+  Configuration config = configuration();
+  config.set(Setting::idleSeconds, 0);
+  applyConfiguration(config);
+  display.render(fakeNow, status);
+  assert(!display.isPoweredOff_);
+  fakeNow = 3600000;
+  display.render(fakeNow, status);
+  assert(!display.isPoweredOff_); // Disabled timeout never sleeps.
+  applyConfiguration(Configuration{});
+}
+
+static void testInputActivity() {
+  InputController input;
+  input.scanMatrix(1);
+  assert(!input.takeActivity());
+  digitalReadOverride = [](uint32_t pin) {
+    return pin == kColPins[0] ? LOW : HIGH;
+  };
+  input.scanMatrix(10);
+  assert(input.takeActivity() && !input.takeActivity());
+  input.scanMatrix(20);
+  assert(input.takeActivity());
+  input.scanMatrix(300020); // Held keys keep the screen awake.
+  assert(input.takeActivity());
+  digitalReadOverride = nullptr;
+  input.scanMatrix(300030);
+  input.scanMatrix(300040);
+  assert(input.takeActivity()); // Release restarts the full idle interval.
+  input.scanMatrix(300050);
+  assert(!input.takeActivity());
+  input.queueEncoderStep(1);
+  assert(input.takeActivity() && input.pendingEncoderSteps_ == 1);
+  input.settingsMenu_.open();
+  input.queueEncoderStep(-1);
+  assert(input.takeActivity()); // Menu-only input also wakes the display.
+}
+
+static void testBootSplash() {
+  applyConfiguration(Configuration{});
+  for (uint32_t start : {0U, UINT32_MAX - 200U}) {
+    DisplayController display;
+    fakeNow = start;
+    display.begin(serviceInput);
+    DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
+    assert(fakeNow == start && !display.isSplashVisible_);
+    fakeNow = start + 100U;
+    const unsigned previousInputCalls = inputCalls;
+    display.render(fakeNow, status);
+    assert(display.isSplashVisible_ && display.splashShownAt_ == fakeNow);
+    assert(inputCalls ==
+        previousInputCalls + 16); // Scanner serviced during splash transfer.
+    assert(display.display_.lastText == "forestboard");
+    assert(display.display_.cursorX == 40 && display.display_.cursorY == 60);
+    const uint8_t* pixels = display.display_.getBuffer();
+    int left = 128, right = -1, top = 128, bottom = -1;
+    for (int y = 0; y < 128; ++y) {
+      for (int x = 0; x < 128; ++x) {
+        if (pixels[x + (y / 8) * 128] & (1 << (y % 8))) {
+          left = min(left, x);
+          right = max(right, x);
+          top = min(top, y);
+          bottom = max(bottom, y);
+        }
+      }
+    }
+    // Text is not rasterized by the mock; combine its real 5x7 font bounds
+    // with the tree geometry to check centering within one pixel.
+    assert(right == 33 && left == 23);
+    assert(left == 127 - (display.display_.cursorX + 65 - 1));
+    assert(abs(top - (127 - bottom)) <= 1);
+    fakeNow = start + 3099U;
+    display.render(fakeNow, status);
+    assert(
+        display.isSplashPending_ && display.display_.lastText == "forestboard");
+    fakeNow = start + 3100U;
+    display.render(fakeNow, status);
+    assert(!display.isSplashPending_ &&
+        display.display_.lastText != "forestboard");
+    display.requestRecovery();
+    fakeNow = start + 3200U;
+    display.render(fakeNow, status);
+    fakeNow = start + 3300U;
+    display.render(fakeNow, status);
+    assert(!display.isSplashPending_ &&
+        display.display_.lastText != "forestboard");
+  }
+  DisplayController delayed;
+  fakeNow = 0;
+  delayed.begin(serviceInput);
+  DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
+  failOled = true;
+  fakeNow = 100;
+  delayed.render(fakeNow, status);
+  assert(!delayed
+          .isSplashVisible_); // A failed transfer does not consume splash time.
+  failOled = false;
+  fakeNow = 110;
+  delayed.render(fakeNow, status);
+  fakeNow = 210;
+  delayed.render(fakeNow, status);
+  assert(delayed.isSplashVisible_ && delayed.splashShownAt_ == 210);
+  fakeNow = 3209;
+  delayed.render(fakeNow, status);
+  assert(delayed.isSplashPending_);
+  fakeNow = 3210;
+  delayed.render(fakeNow, status);
+  assert(!delayed.isSplashPending_);
+}
+
+static void testPersistentSplashSetting() {
+  applyConfiguration(Configuration{});
+  InputController input;
+  auto& menu = input.settingsMenu_;
+  menu.open();
+  chooseSetting(menu, Setting::showSplash);
+  typeNumber(menu, "1");
+  menu.select();
+  // The added Display row leaves Back accessible through the scrolled list.
+  menu.key(hid::DOWN);
+  assert(menu.groupSetting(menu.selected_) == Setting::idleSeconds);
+  menu.key(hid::DOWN);
+  assert(menu.groupSetting(menu.selected_) == Setting::Count);
+  Adafruit_SH1107 screen;
+  menu.render(screen);
+  assert(screen.getBuffer()[7 + 9 * 128] &
+      (1 << 5)); // Selected Back arrow at y=77.
+  menu.select();
+  assert(menu.page_ == SettingsMenu::Page::Root);
+  requestMenuSave(menu);
+  input.serviceSettings();
+  assert(configuration().showSplash() && !menu.isOpen());
+  Configuration settings = configuration();
+  settings.set(Setting::gameMode, 1);
+  applyConfiguration(settings);
+  DisplayController display;
+  fakeNow = 0;
+  display.begin(serviceInput);
+  display.animationManager_.select(9);
+  DisplayStatus status = {
+      "CMK", "", 0, false, false, false, false, true, &menu};
+  fakeNow = 100;
+  display.render(fakeNow, status);
+  fakeNow = 3100;
+  display.render(fakeNow, status);
+  assert(
+      !display.isSplashPending_ && display.display_.lastText == "forestboard");
+  assert(
+      !display.isInteractiveAnimation()); // Hidden game cannot consume typing.
+  const auto selected = display.animationManager_.currentIndex();
+  display.stepAnimation(3200, 1);
+  assert(display.animationManager_.currentIndex() == selected);
+  status.isGameModeActive = false;
+  fakeNow = 900000;
+  display.onActivity(fakeNow); // Keep this splash/rotation check awake.
+  display.render(fakeNow, status);
+  assert(display.display_.lastText == "forestboard");
+  assert(display.animationManager_.currentIndex() == selected);
+  menu.open();
+  fakeNow += 100;
+  display.render(fakeNow, status);
+  assert(display.display_.lastText != "forestboard"); // Menu takes priority.
+  chooseSetting(menu, Setting::showSplash);
+  typeNumber(menu, "0");
+  menu.select();
+  requestMenuSave(menu);
+  input.serviceSettings();
+  fakeNow += 100;
+  display.render(fakeNow, status);
+  assert(!configuration().showSplash() &&
+      display.display_.lastText != "forestboard");
+  assert(display.isInteractiveAnimation());
+  applyConfiguration(Configuration{});
 }
 
 static void testCometsFinishDuringTypingBursts() {
@@ -353,12 +1076,24 @@ int main() {
   testCometLaunchLocations();
   testPhysicalLayout();
   testGameMode();
+  testSettingsMenu();
+  testConfigurationLimits();
+  testMenuOwnsGameMode();
+  testResetStatsConfirmation();
+  testAnimationSettingsAndPhysicalBindingEditor();
+  testBikeRandomJumpsAndSpeed();
+  testBikeWheelies();
+  testBikeRampApproach();
   testConsumerReports();
   testAnimationClock();
   testBikeTricks();
   testAnimationStress();
   exportBikePreview();
+  testRuntimeDisplaySettings();
   testDisplayRecovery();
-  testShading();
+  testBootSplash();
+  testPersistentSplashSetting();
+  testScreenTimeout();
+  testInputActivity();
   puts("Firmware behavior tests passed");
 }

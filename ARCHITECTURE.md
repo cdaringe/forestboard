@@ -11,6 +11,8 @@ src/
   usb/
     hid_device.cpp
     usb_pinmap.cpp
+  settings/
+    settings_menu.cpp
   storage/
     keystroke_counter.cpp
   display/
@@ -24,7 +26,6 @@ src/
       oled_diagnostic_renderer.cpp
     effects/
       keystroke_milestone_effect.cpp
-      oled_shading.cpp
     widgets/
       key_capture_overlay.cpp
       keystroke_count_format.cpp
@@ -36,15 +37,27 @@ src/
   requests; it does not draw. Queued presses retain their original Game mode.
 - **USB** adapts STM32duino's keyboard and Consumer Control interfaces, maintains
   report storage through transfer completion, and receives host LED state.
-- **Storage** owns the two-sector keystroke journal, verified commit protocol,
-  and 10,000-key checkpoint policy. Milestone display events do not write flash.
+- **Configuration** is generated from `include/config/settings.def`: one typed
+  model, defaults, limits, labels, groups, editor kinds, and storage ordering. All runtime
+  consumers read `configuration()`; hardware build options stay separate.
+- **Settings** owns the hierarchical menu and its RAM-only draft. It requests
+  saves/resets; the main loop services those requests outside display transfers.
+- **Bike controls** resolve configurable physical switch usages to stable action
+  IDs before layout translation. Key-binding editors capture physical keys; only
+  configured controls are suppressed from the host while playing.
+- **Storage** owns the shared two-sector journal for configuration and keystrokes,
+  versioned 64-byte snapshots (v4 packs settings in 16-bit slots), verified commit protocol, and 10,000-key automatic
+  checkpoints. Explicit saves and confirmed resets are additional transactions.
+  Milestone display events and menu edits do not write flash.
 - **Display** owns frame scheduling, recovery, scene selection, and composition.
+  Input activity resets its configurable idle timer; sleeping stops panel traffic
+  until a key or encoder event wakes it. Keyboard scanning continues during sleep.
   `oled_transport` owns panel pins, SPI, controller commands, and RAM transfers.
-- **Animations** draw scenes into the shared framebuffer. **Effects** shade or
-  temporarily decorate scenes. **Widgets** draw readable state and capture text.
+- **Animations** draw scenes into the shared framebuffer. **Effects** temporarily
+  decorate scenes. **Widgets** draw readable state and capture text.
   **Diagnostics** provide a deterministic scene for isolating display faults.
 
-Build-time defaults live in `include/config/firmware_config.h`. `DisplayStatus`
+Hardware build options live in `include/config/firmware_config.h`. `DisplayStatus`
 is the display's snapshot of keyboard state; the controller does not depend on
 `InputController`. Main supplies a callback that services keyboard input
 between OLED pages. Animation code does not send HID reports or transfer pixels

@@ -17,6 +17,7 @@ public:
 
   void begin(void (*serviceInput)() = nullptr);
   void requestRecovery();
+  void onActivity(uint32_t now);
   void onKeyPress(uint8_t usage, bool isGameMode);
   bool isInteractiveAnimation() const;
   void render(uint32_t now, const DisplayStatus& status);
@@ -44,7 +45,13 @@ private:
   KeystrokeMilestoneEffect milestoneEffect_;
   OledDiagnosticRenderer diagnosticRenderer_;
   StatusBar statusBar_;
+  uint32_t splashShownAt_ = 0;
+  bool isSplashPending_ = false;
+  bool isSplashVisible_ = false;
   uint32_t lastFrameAt_ = 0;
+  uint32_t lastActivityAt_ = 0;
+  bool isIdle_ = false;
+  bool isPoweredOff_ = false;
   uint32_t lastAnimationChangeAt_ = 0;
   uint32_t lastObservedKeystrokeCount_ = 0;
   bool isReady_ = false;
@@ -55,5 +62,6 @@ private:
   uint32_t recoveryStartedAt_ = 0;
   uint32_t lastRecoveryAttemptAt_ = 0;
   uint32_t lastRefreshAt_ = 0;
+  uint32_t configuredContrast_ = 0;
   void (*serviceInput_)() = nullptr;
 };

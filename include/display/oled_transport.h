@@ -12,4 +12,5 @@ public:
   void reset();
   bool transferFrame(void (*serviceInput)());
   bool powerOn();
+  bool powerOff();
 };

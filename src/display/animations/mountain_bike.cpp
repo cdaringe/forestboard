@@ -1,13 +1,20 @@
 #include "display/animations/animation.h"
 #include "display/animations/animation_math.h"
+#include "display/animations/bike_controls.h"
 
 namespace {
 constexpr float kRiderX = 32;
-constexpr float kTrackSpeed = 38;
+constexpr float kWheelbase = 16;
+constexpr float kRampLength = 12;
+constexpr float kRampHeight = 8;
+constexpr float kRearWheelX = kRiderX - kWheelbase / 2;
 constexpr uint32_t kAirTimeMs = 1200;
 constexpr uint32_t kTrickTimeMs = 650;
-constexpr uint8_t kUp = 0x52, kDown = 0x51;
-constexpr uint8_t kJ = 0x0D, kB = 0x05, kC = 0x06, kT = 0x17;
+constexpr uint32_t kWheelieTimeMs = 1200;
+constexpr uint8_t kUp = bikeControls::up, kDown = bikeControls::down;
+constexpr uint8_t kJ = bikeControls::jump, kB = bikeControls::backflip;
+constexpr uint8_t kC = bikeControls::cancan, kT = bikeControls::spin;
+constexpr uint8_t kWheelie = bikeControls::wheelie;
 enum class Trick : uint8_t { None, Backflip, Cancan, Spin };
 struct Jump {
   float x;
@@ -52,8 +59,10 @@ const char* trickLabel(Trick trick) {
 // Transform the bicycle and rider as one pose during flips and spins.
 class RiderPose {
 public:
-  RiderPose(float y, Trick trick, uint8_t phase)
+  RiderPose(float y, Trick trick, uint8_t phase, float frontRise = 0)
       : y_(y), isSpinning_(trick == Trick::Spin) {
+    pitchSine_ = -frontRise / kWheelbase;
+    pitchCosine_ = sqrtf(1 - pitchSine_ * pitchSine_);
     if (trick == Trick::Backflip) {
       sine_ = -animationMath::sine(phase) / 127.0f;
       cosine_ = animationMath::sine(phase + 64) / 127.0f;
@@ -66,8 +75,14 @@ public:
   Point project(Point point) const {
     const float x = point.x * width_;
     const float y = point.y + 7;
-    return {static_cast<int16_t>(kRiderX + x * cosine_ - y * sine_),
-        static_cast<int16_t>(y_ - 7 + x * sine_ + y * cosine_)};
+    const float rotatedX = x * cosine_ - y * sine_ + kWheelbase / 2;
+    const float rotatedY = -7 + x * sine_ + y * cosine_;
+    // Pitch the whole rider/bike about the rear axle, keeping its tire
+    // grounded.
+    return {static_cast<int16_t>(lroundf(
+                kRearWheelX + rotatedX * pitchCosine_ - rotatedY * pitchSine_)),
+        static_cast<int16_t>(
+            lroundf(y_ + rotatedX * pitchSine_ + rotatedY * pitchCosine_))};
   }
 
   void drawLine(Adafruit_SH1107& display, Point from, Point to) const {
@@ -90,6 +105,7 @@ private:
   float sine_ = 0;
   float cosine_ = 1;
   float width_ = 1;
+  float pitchSine_ = 0, pitchCosine_ = 1;
   bool isSpinning_;
 };
 
@@ -115,6 +131,9 @@ public:
     landedTricks_ = 0;
     isTrickFinished_ = false;
     random_ = 0xB1CE1234;
+    isWheelieActive_ = wasGameMode_ = false;
+    randomJumpRemainingMs_ = 0;
+    launchFrontRise_ = kRampHeight;
   }
 
   void onKeyPress(uint8_t usage, bool isGameMode) override {
@@ -129,6 +148,12 @@ public:
     case kJ:
       addJump();
       break;
+    case kWheelie:
+      if (!isAirborne_ && !isWheelieActive_) {
+        isWheelieActive_ = true;
+        wheelieStartedAt_ = now_;
+      }
+      break;
     default:
       startTrick(trickForKey(action));
       break;
@@ -140,6 +165,8 @@ public:
     advanceTrack(seconds);
     advanceJumps(seconds);
     advanceAirborneState();
+    advanceWheelie();
+    advanceRandomJumps(seconds);
     display.clearDisplay();
     drawTrack(display);
     drawJumps(display);
@@ -155,6 +182,9 @@ private:
   float advanceClock(uint32_t now) {
     const uint32_t elapsed = isStarted_ ? now - now_ : 0;
     now_ = now;
+    if (!isStarted_ && isWheelieActive_) {
+      wheelieStartedAt_ = now;
+    }
     isStarted_ = true;
     return min(elapsed, uint32_t{50}) / 1000.0f;
   }
@@ -167,6 +197,9 @@ private:
     if (isAirborne_) {
       const uint8_t tricks[] = {kB, kC, kT};
       return tricks[choice % 3];
+    }
+    if (choice < 16) {
+      return kWheelie;
     }
     if (choice < 48) {
       return kJ;
@@ -181,9 +214,9 @@ private:
     lane_ = constrain(static_cast<int>(lane_) + direction, 0, 2);
   }
 
-  bool isJumpNearSpawn() const {
+  bool isJumpNearSpawn(uint8_t lane) const {
     for (const Jump& jump : jumps_) {
-      const bool isSameLane = jump.lane == lane_;
+      const bool isSameLane = jump.lane == lane;
       if (jump.isActive && isSameLane && jump.x > 98) {
         return true;
       }
@@ -192,12 +225,16 @@ private:
   }
 
   void addJump() {
-    if (isJumpNearSpawn()) {
+    addJumpInLane(lane_);
+  }
+
+  void addJumpInLane(uint8_t lane) {
+    if (isJumpNearSpawn(lane)) {
       return;
     }
     for (Jump& jump : jumps_) {
       if (!jump.isActive) {
-        jump = {124, lane_, true};
+        jump = {124, lane, true};
         return;
       }
     }
@@ -219,7 +256,7 @@ private:
   }
 
   void advanceTrack(float seconds) {
-    scroll_ += kTrackSpeed * seconds;
+    scroll_ += configuration().mtbSpeed() * seconds;
     if (scroll_ >= 128) {
       scroll_ -= 128;
     }
@@ -228,12 +265,16 @@ private:
   }
 
   bool isRampCrossed(const Jump& jump, float previousX) const {
-    const bool isCrossingRider = previousX >= kRiderX && jump.x < kRiderX;
+    const float takeoffX = kRearWheelX +
+        sqrtf(kWheelbase * kWheelbase - kRampHeight * kRampHeight);
+    const bool isCrossingRider = previousX >= takeoffX && jump.x < takeoffX;
     const bool isLaneAligned = fabsf(riderY_ - laneY(jump.lane)) < 2;
     return !isAirborne_ && isCrossingRider && isLaneAligned;
   }
 
   void launch() {
+    launchFrontRise_ = max(kRampHeight, wheelieRise());
+    isWheelieActive_ = false;
     isAirborne_ = true;
     launchedAt_ = now_;
     trick_ = Trick::None;
@@ -246,7 +287,7 @@ private:
         continue;
       }
       const float previousX = jump.x;
-      jump.x -= kTrackSpeed * seconds;
+      jump.x -= configuration().mtbSpeed() * seconds;
       if (isRampCrossed(jump, previousX)) {
         launch();
       }
@@ -271,6 +312,85 @@ private:
       ++landedTricks_;
     }
     trick_ = Trick::None;
+  }
+
+  void advanceRandomJumps(float seconds) {
+    const bool gameMode = configuration().gameMode() != 0;
+    if (!gameMode) {
+      wasGameMode_ = false;
+      return;
+    }
+    if (!wasGameMode_) {
+      random_ ^=
+          now_; // Vary play sessions without blocking on external entropy.
+      randomJumpRemainingMs_ = 0;
+      wasGameMode_ = true;
+    }
+    randomJumpRemainingMs_ -= seconds * 1000;
+    if (randomJumpRemainingMs_ > 0) {
+      return;
+    }
+    // Most ramps are reachable without steering; the rest invite lane changes.
+    const uint8_t choice = animationMath::randomByte(random_);
+    const uint8_t lane = choice < 192 ? lane_ : (lane_ + 1 + (choice & 1)) % 3;
+    addJumpInLane(lane);
+    randomJumpRemainingMs_ = configuration().mtbJumpIntervalMs() *
+        (0.75f + animationMath::randomByte(random_) / 510.0f);
+  }
+
+  float wheelieRise() const {
+    if (!isWheelieActive_ || isAirborne_) {
+      return 0;
+    }
+    const float phase = min(
+        (now_ - wheelieStartedAt_) / static_cast<float>(kWheelieTimeMs), 1.0f);
+    // Smooth rise and return around the rear axle, with no airborne
+    // translation.
+    return 9.0f * sinf(phase * 3.14159265f);
+  }
+
+  void advanceWheelie() {
+    if (isWheelieActive_ && now_ - wheelieStartedAt_ >= kWheelieTimeMs) {
+      isWheelieActive_ = false;
+      ++landedTricks_;
+    }
+  }
+
+  float frontWheelRise() const {
+    if (isAirborne_) {
+      // Carry the ramp pitch into takeoff, then settle smoothly into flight.
+      const float progress = min((now_ - launchedAt_) / 250.0f, 1.0f);
+      return launchFrontRise_ * (1 - progress);
+    }
+    float rise = wheelieRise();
+    for (const Jump& jump : jumps_) {
+      if (!jump.isActive || jump.lane != lane_ ||
+          fabsf(riderY_ - laneY(jump.lane)) >= 2) {
+        continue;
+      }
+      const float takeoffX = kRearWheelX +
+          sqrtf(kWheelbase * kWheelbase - kRampHeight * kRampHeight);
+      if (jump.x < takeoffX || jump.x - kRampLength > kRiderX + 8) {
+        continue;
+      }
+      // Solve a fixed-length wheelbase with rear tire on the flat and front
+      // tire bottom on the ramp. As pitch rises the front axle moves backward.
+      float low = 0, high = kRampHeight;
+      for (uint8_t i = 0; i < 12; ++i) {
+        const float height = (low + high) * 0.5f;
+        const float frontX =
+            kRearWheelX + sqrtf(kWheelbase * kWheelbase - height * height);
+        const float slopeHeight =
+            (frontX - (jump.x - kRampLength)) * kRampHeight / kRampLength;
+        if (height < slopeHeight) {
+          low = height;
+        } else {
+          high = height;
+        }
+      }
+      rise = max(rise, (low + high) * 0.5f);
+    }
+    return rise;
   }
 
   float airborneHeight() const {
@@ -324,7 +444,8 @@ private:
       }
       const int16_t x = jump.x;
       const int16_t y = laneY(jump.lane) + 4;
-      display.drawTriangle(x - 12, y, x, y - 8, x + 5, y, SH110X_WHITE);
+      display.drawTriangle(
+          x - kRampLength, y, x, y - kRampHeight, x + 5, y, SH110X_WHITE);
       display.drawLine(x - 7, y - 1, x - 1, y - 5, SH110X_WHITE);
     }
   }
@@ -362,7 +483,8 @@ private:
 
   void drawRider(Adafruit_SH1107& display) const {
     const Trick poseTrick = isTrickFinished_ ? Trick::None : trick_;
-    const RiderPose pose(riderY_ - airborneHeight(), poseTrick, trickPhase());
+    const RiderPose pose(
+        riderY_ - airborneHeight(), poseTrick, trickPhase(), frontWheelRise());
     drawBicycle(display, pose);
     drawBody(display, pose);
   }
@@ -374,13 +496,16 @@ private:
     display.print("MTB ");
     display.print(landedTricks_);
     display.setCursor(66, 2);
-    display.print(trickLabel(trick_));
+    display.print(isWheelieActive_ ? "WHEELIE" : trickLabel(trick_));
   }
 
   Jump jumps_[6] = {};
   uint8_t lane_ = 1;
   float riderY_ = 75;
   float scroll_ = 0;
+  float randomJumpRemainingMs_ = 0, launchFrontRise_ = kRampHeight;
+  uint32_t wheelieStartedAt_ = 0;
+  bool isWheelieActive_ = false, wasGameMode_ = false;
   uint32_t now_ = 0, launchedAt_ = 0, trickStartedAt_ = 0;
   uint32_t random_ = 0xB1CE1234;
   uint16_t landedTricks_ = 0;

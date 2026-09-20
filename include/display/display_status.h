@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+class SettingsMenu;
+
 struct DisplayStatus {
   const char* layoutBadgeLabel;
   const char* capturedKeys;
@@ -11,4 +13,5 @@ struct DisplayStatus {
   bool isKeyCaptureActive;
   bool isFunctionKeyActive;
   bool isGameModeActive;
+  const SettingsMenu* settingsMenu = nullptr;
 };

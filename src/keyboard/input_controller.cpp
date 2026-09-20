@@ -1,6 +1,7 @@
 #include "keyboard/input_controller.h"
+#include "display/animations/bike_controls.h"
 
-#if defined(ERGOBOARD_KEYBOARD_MODE)
+#if defined(FORESTBOARD_KEYBOARD_MODE)
 
 #include <cstring>
 #include <usbd_hid_composite_if.h>
@@ -16,7 +17,7 @@ constexpr uint32_t kDebounceMs = 5;
 constexpr uint32_t kReportRefreshMs = 20;
 constexpr uint32_t kLineSettleUs = 3;
 constexpr uint32_t kMediaTapMs = 16;
-constexpr uint32_t kGameHoldMs = 350;
+constexpr uint32_t kSettingsHoldMs = 350;
 constexpr uint32_t kRapidClickGapMs = 750;
 constexpr size_t kCaptureCharacterCount = 21;
 
@@ -480,6 +481,7 @@ bool isUsageInReport(const KeyboardReport& report, uint8_t usage) {
 
 void InputController::begin() {
   keystrokeCounter_.begin();
+  applyConfiguration(keystrokeCounter_.savedConfiguration());
 
   // STM32duino's USB setup configures every entry in PinMap_USB_OTG_FS,
   // including PA8 as the optional USB SOF output. PA8 is COL11 on this board,
@@ -505,17 +507,41 @@ void InputController::begin() {
   sendReport();
 }
 
+void InputController::serviceSettings() {
+  settingsMenu_.setStats(keystrokeCounter_.count());
+  if (settingsMenu_.resetRequested()) {
+    const bool success = keystrokeCounter_.resetStats();
+    settingsMenu_.setStats(keystrokeCounter_.count());
+    settingsMenu_.finishReset(success);
+  }
+  if (!settingsMenu_.saveRequested()) {
+    return;
+  }
+  const bool success =
+      keystrokeCounter_.saveConfiguration(settingsMenu_.draft());
+  if (success) {
+    applyConfiguration(settingsMenu_.draft());
+  }
+  settingsMenu_.finishSave(success);
+}
+
 void InputController::service(uint32_t now) {
   if (now - lastScanAt_ < kScanIntervalMs) {
     return;
   }
   lastScanAt_ = now;
-  updateGameMode(now);
+  updateSettingsMenu(now);
   // Matrix input is the keyboard's primary latency-sensitive work. Encoder
   // service follows immediately and is delayed by only one matrix scan.
   scanMatrix(now);
   scanEncoder();
   serviceMediaKey(now);
+}
+
+bool InputController::takeActivity() {
+  const bool active = isActivityPending_;
+  isActivityPending_ = false;
+  return active;
 }
 
 bool InputController::takeDisplayRecoveryRequest() {
@@ -525,7 +551,7 @@ bool InputController::takeDisplayRecoveryRequest() {
 }
 
 bool InputController::isGameModeActive() const {
-  return isGameModeActive_;
+  return configuration().gameMode();
 }
 void InputController::setInteractiveAnimation(bool isActive) {
   isInteractiveAnimation_ = isActive;
@@ -555,7 +581,7 @@ bool InputController::isInsertModeActive() const {
 }
 
 bool InputController::isKeyCaptureActive() const {
-  return isKeyCaptureActive_;
+  return configuration().keyCapture();
 }
 
 bool InputController::isKeyActive(KeyboardKey key) const {
@@ -615,71 +641,76 @@ void InputController::toggleKeyboardLayout() {
       : KeyboardLayout::Colemak;
 }
 
-bool InputController::isGameHoldDue(uint32_t now) const {
+bool InputController::isSettingsHoldDue(uint32_t now) const {
   const bool isLayoutKeyDown = isKeyActive(KeyboardKey::LayoutSwitch);
-  const bool isHoldElapsed = now - layoutKeyPressedAt_ >= kGameHoldMs;
-  return isLayoutKeyDown && isHoldElapsed && !isLayoutKeyUsedForRecovery_;
+  const bool isHoldElapsed = now - layoutKeyPressedAt_ >= kSettingsHoldMs;
+  return !settingsMenu_.isOpen() && isLayoutKeyDown && isHoldElapsed &&
+      !isLayoutKeyUsedForRecovery_ && !isLayoutKeyHeldForSettings_;
 }
 
-void InputController::updateGameMode(uint32_t now) {
-  if (!isGameHoldDue(now)) {
+void InputController::updateSettingsMenu(uint32_t now) {
+  if (!isSettingsHoldDue(now)) {
     return;
   }
-  isGameModeActive_ = true;
-  isLayoutKeyHeldForGame_ = true;
+  settingsMenu_.open();
+  // Suppress already-held keys until release, including modifiers and mute.
+  for (uint8_t row = 0; row < kRows; ++row) {
+    for (uint8_t col = 0; col < kCols; ++col) {
+      if (isPressed_[row][col]) {
+        isCapturedForGame_[row][col] = true;
+      }
+    }
+  }
+  animationKeyHead_ = animationKeyTail_ = 0;
+  pendingEncoderSteps_ = pendingAnimationSteps_ = 0;
+  sendReport();
+  isLayoutKeyHeldForSettings_ = true;
 }
 
 void InputController::beginLayoutKeyPress(uint32_t now) {
   layoutKeyPressedAt_ = now;
-  isLayoutKeyHeldForGame_ = false;
+  isLayoutKeyHeldForSettings_ = false;
   isLayoutKeyUsedForRecovery_ = isKeyActive(KeyboardKey::Function);
   isDisplayRecoveryPending_ |= isLayoutKeyUsedForRecovery_;
 }
 
 void InputController::finishLayoutKeyPress() {
-  isGameModeActive_ = false;
-  const bool isTap = !isLayoutKeyUsedForRecovery_ && !isLayoutKeyHeldForGame_;
+  const bool isTap = !settingsMenu_.isOpen() && !isLayoutKeyUsedForRecovery_ &&
+      !isLayoutKeyHeldForSettings_;
   isLayoutKeyUsedForRecovery_ = false;
-  isLayoutKeyHeldForGame_ = false;
+  isLayoutKeyHeldForSettings_ = false;
   if (!isTap) {
     return;
   }
   toggleKeyboardLayout();
-  if (isKeyCaptureActive_) {
+  if (configuration().keyCapture()) {
     appendCaptureToken("LYR");
   }
 }
 
-bool isGameControlUsage(uint8_t usage) {
-  switch (usage) {
-  case hid::UP:
-  case hid::DOWN:
-  case hid::J:
-  case hid::B:
-  case hid::C:
-  case hid::T:
-    return true;
-  default:
-    return false;
-  }
-}
-
-void InputController::queueAnimationKey(uint8_t usage) {
+void InputController::queueAnimationKey(uint8_t usage, bool isGameInput) {
   const uint8_t nextHead = (animationKeyHead_ + 1) % kAnimationKeyCapacity;
   const bool isQueueFull = nextHead == animationKeyTail_;
   if (isQueueFull) {
     return;
   }
-  animationKeys_[animationKeyHead_] = {usage, isGameModeActive_};
+  animationKeys_[animationKeyHead_] = {usage, isGameInput};
   animationKeyHead_ = nextHead;
 }
 
 void InputController::captureAnimationKey(uint8_t row, uint8_t col) {
-  // Bindings follow the logical letters produced on the Colemak host.
-  const uint8_t usage = logicalUsageAt(row, col);
-  const bool isGameInputActive = isGameModeActive_ && isInteractiveAnimation_;
-  isCapturedForGame_[row][col] = isGameInputActive && isGameControlUsage(usage);
-  queueAnimationKey(usage);
+  const bool isGameInputActive =
+      configuration().gameMode() && isInteractiveAnimation_;
+  const uint8_t action = bikeControls::actionForPhysicalKey(kKeymap[row][col]);
+  isCapturedForGame_[row][col] = isGameInputActive && action != 0;
+  // Never send arbitrary game-mode key usages as action IDs: only bindings.
+  if (isGameInputActive) {
+    if (action != 0) {
+      queueAnimationKey(action, true);
+    }
+  } else {
+    queueAnimationKey(logicalUsageAt(row, col), false);
+  }
 }
 
 void InputController::updateNumLockGesture(
@@ -698,7 +729,11 @@ bool InputController::isNumLockGestureComplete() const {
 }
 
 void InputController::toggleCaptureMode() {
-  isKeyCaptureActive_ = !isKeyCaptureActive_;
+  Configuration next = configuration();
+  next.set(Setting::keyCapture, !next.keyCapture());
+  if (keystrokeCounter_.saveConfiguration(next)) {
+    applyConfiguration(next);
+  }
   rapidNumLockClicks_ = 0;
   keyCaptureText_[0] = '\0';
 }
@@ -707,12 +742,27 @@ void InputController::handleKeyPress(uint8_t row, uint8_t col, uint32_t now) {
   if (kKeymap[row][col] == hid::NONE) {
     return;
   }
+  if (settingsMenu_.isOpen()) {
+    isCapturedForGame_[row][col] = true;
+    if (kLayerKeyPosition.isMatch(row, col)) {
+      isLayoutKeyHeldForSettings_ = true;
+    }
+    if (kMuteKeyPosition.isMatch(row, col)) {
+      settingsMenu_.select();
+    } else {
+      settingsMenu_.key(logicalUsageAt(row, col), kKeymap[row][col]);
+    }
+    return;
+  }
   keystrokeCounter_.recordKeystroke();
   if (kLayerKeyPosition.isMatch(row, col)) {
     beginLayoutKeyPress(now);
     return;
   }
   captureAnimationKey(row, col);
+  if (isCapturedForGame_[row][col]) {
+    return;
+  }
   updateNumLockGesture(row, col, now);
   if (isNumLockGestureComplete()) {
     toggleCaptureMode();
@@ -721,7 +771,7 @@ void InputController::handleKeyPress(uint8_t row, uint8_t col, uint32_t now) {
   if (kInsertKeyPosition.isMatch(row, col)) {
     isInsertModeActive_ = !isInsertModeActive_;
   }
-  if (!isKeyCaptureActive_) {
+  if (!configuration().keyCapture()) {
     return;
   }
   const uint8_t usage = activeUsageAt(row, col);
@@ -791,6 +841,11 @@ void InputController::scanEncoder() {
 }
 
 void InputController::queueEncoderStep(int8_t direction) {
+  isActivityPending_ = true;
+  if (settingsMenu_.isOpen()) {
+    settingsMenu_.rotate(direction);
+    return;
+  }
   if (isPressed_[kFnKeyPosition.row][kFnKeyPosition.col]) {
     if ((direction > 0 && pendingAnimationSteps_ < 8) ||
         (direction < 0 && pendingAnimationSteps_ > -8)) {
@@ -834,7 +889,8 @@ uint8_t InputController::nextMediaKey(uint32_t now) const {
 }
 
 uint8_t InputController::consumerButtons(uint8_t mediaKey) const {
-  const bool isMutePressed =
+  const bool isMutePressed = !settingsMenu_.isOpen() &&
+      !isCapturedForGame_[kMuteKeyPosition.row][kMuteKeyPosition.col] &&
       isPressed_[kMuteKeyPosition.row][kMuteKeyPosition.col];
   return mediaKey | (isMutePressed ? usbConsumer::mute : 0);
 }
@@ -853,7 +909,7 @@ void InputController::applyMediaTransition(uint8_t nextKey, uint32_t now) {
 }
 
 void InputController::serviceMediaKey(uint32_t now) {
-  const uint8_t nextKey = nextMediaKey(now);
+  const uint8_t nextKey = settingsMenu_.isOpen() ? 0 : nextMediaKey(now);
   const uint8_t report = consumerButtons(nextKey);
   const bool isReportChanged = report != lastConsumerReport_;
   // Endpoint backpressure must not consume detents or start the hold timer.
@@ -915,6 +971,8 @@ void InputController::scanMatrix(uint32_t now) {
     result.isReportChanged |= scanned.isReportChanged;
   }
   isRawKeyActive_ = result.isAnyPressed;
+  // Include held keys and releases, even when input is captured locally.
+  isActivityPending_ |= result.isAnyPressed || result.isReportChanged;
   const bool isRefreshDue = now - lastReportAt_ >= kReportRefreshMs;
   if (result.isReportChanged || isRefreshDue) {
     sendReport();
@@ -953,8 +1011,8 @@ void InputController::sendReport() {
   uint8_t keyCount = 0;
   for (uint8_t row = 0; row < kRows; ++row) {
     for (uint8_t col = 0; col < kCols; ++col) {
-      const bool isHostKey =
-          isPressed_[row][col] && !isCapturedForGame_[row][col];
+      const bool isHostKey = !settingsMenu_.isOpen() && isPressed_[row][col] &&
+          !isCapturedForGame_[row][col];
       if (isHostKey) {
         appendReportUsage(report, keyCount, activeUsageAt(row, col));
       }
@@ -964,4 +1022,4 @@ void InputController::sendReport() {
       reinterpret_cast<uint8_t*>(&report), sizeof(report));
 }
 
-#endif // ERGOBOARD_KEYBOARD_MODE
+#endif // FORESTBOARD_KEYBOARD_MODE

@@ -35,18 +35,19 @@ The navigation cluster is:
 ```text
 Insert  Home  Page Up
 Delete  End   Page Down
-              Layout/Game
+              Layout/Settings
 ```
 
 `Fn` is now `SW105`, immediately right of Space. `LAYER_KEY` is `SW79`,
 below Page Down. Tapping it switches Colemak (`CMK`) / QWERTY (`QTY`);
-holding it for 350 ms enters momentary Game mode, shown by a `GAME` badge.
-Releasing a held layout key exits Game mode without changing the layout.
+holding it for 350 ms opens Settings. It never toggles Game mode.
+Enable or disable Game mode in **Settings → Keyboard → Game mode**, then
+choose **Save & exit**. It stays active after release and across power cycles.
 This remains a Colemak-first keyboard: leave the host input source on Colemak.
 `CMK` sends canonical matrix usages; `QTY` applies the existing inverse Colemak
 mapping. The physical remap does not change that translation.
 
-Hold `Fn` and tap `Layout/Game` to request an OLED hardware reset and redraw.
+Hold `Fn` and tap `Layout/Settings` to request an OLED hardware reset and redraw.
 This chord does not switch layouts or enter Game mode.
 
 The encoder rotates through volume up/down and its push switch sends Mute.
@@ -58,7 +59,7 @@ keyboard-page volume usages that failed on macOS. Reconnect USB after flashing
 so the host reads the new descriptors; macOS/Bluetooth behavior needs a device test.
 Hold `Fn` while turning the encoder to choose an animation immediately:
 clockwise advances and counter-clockwise goes back. A manual change restarts
-the five-minute animation timer. Four rapid Num Lock taps toggle the OLED
+the configured animation timer (five minutes by default). Four rapid Num Lock taps toggle the OLED
 key-capture overlay. Enabled screen meta-key badges include `NL`, `INS`, `DBG`,
 and a live `FN` indicator while the function key is held.
 
@@ -66,38 +67,91 @@ The OLED advances to the next registered animation every five minutes. Every
 debounced press on a populated matrix position increments a persistent
 keystroke counter. The compact counter badge is stacked above the `CMK`/`QTY`
 badge, and powers of ten (`1`, `10`, `100`, `1K`, and onward) trigger a short
-milestone celebration. Counter checkpoints occur only at multiples of **10,000 keystrokes**; milestone
-celebrations do not cause additional flash writes. Normal power loss can discard
+milestone celebration. Automatic counter checkpoints occur at multiples of **10,000 keystrokes**.
+Explicit settings saves and confirmed statistics resets also commit a snapshot;
+milestone celebrations do not cause additional flash writes. Normal power loss can discard
 up to 9,999 keystrokes since the last successful checkpoint.
 
 The journal reserves flash sectors 6 and 7 (the final 256 KiB), leaving 256 KiB
-for firmware. It appends 16-byte records within the active sector to reduce wear.
-When that sector fills, it erases the other sector, writes and reads back the new
-payload, then writes a final commit marker. Only a verified committed record
-promotes the destination. The previous sector remains intact until the next
-rollover needs that space. Boot scans both sectors for the newest valid committed
-checkpoint; CRC-32 rejects torn or corrupted records. Failed append attempts skip
-their slots rather than rewriting partially programmed flash. Valid KEY2 records
-from the previous 100-key journal are retained and new writes use KEY3 records.
-Flash write failures retain the previous checkpoint and are retried at the next
-10,000-key boundary.
+for firmware. New CFG1 records are 64-byte, versioned snapshots containing both
+the complete settings model and the keystroke count. Existing KEY2/KEY3 counter
+records are read without erasing them; defaults are used until settings are saved.
+Each sector holds 2,048 new snapshots. Knob turns and typing edit RAM only, and
+saving unchanged settings does not write flash.
+
+The payload and CRC-32 are programmed and read back before the final commit
+marker. Boot accepts only committed snapshots with valid CRC, schema version,
+and setting bounds. At rollover, the other sector is erased and verified before
+writing; the previous valid sector is retained until the destination commits.
+Failed append slots are skipped. Sequence exhaustion and recognized future
+record versions disable writes instead of risking wraparound or erasing newer
+settings. A failed save keeps the previous live settings and the menu open.
+A failed reset keeps the previous live count. Interrupted saves/resets recover
+either the entire old snapshot or the entire new one, never a mixture.
+
+## Settings menu
+
+Hold Layout/Settings for 350 ms, then release. The menu has **Display**,
+**Keyboard**, **Animations**, and **Statistics** pages, plus **Save & exit** and **Cancel changes**.
+Holding this key opens the menu only; Game mode is controlled inside the menu.
+
+- Turn the knob or use Up/Down to move between rows. Click, Enter, or Right opens
+  a page or setting. Left or Esc goes back; at the root it cancels changes.
+- In a numeric editor, turn the knob or use Up/Down to adjust. Type digits from
+  the number row or keypad to replace the value; Backspace removes a digit.
+  Enter/click accepts the draft value; Left/Esc cancels that value's edit.
+- Choose **Save & exit** to persist and apply the complete draft. Editing alone
+  does not change the running configuration. Arrow icons indicate navigation.
+- **Statistics → Reset stats** displays the keystroke total and opens a
+  confirmation with **Cancel** selected. Choosing **Yes, reset stats** immediately
+  commits zero while preserving saved settings. This action cannot be undone by
+  later cancelling menu edits. Menu navigation does not increment the count.
+
+While settings are open, keys and knob activity are captured locally rather
+than sent to the host. Held menu keys remain suppressed until released. Automatic
+animation rotation pauses while the menu is open.
+
+The single schema, `include/config/settings.def`, generates the typed model,
+defaults, validation limits, menu labels/groups/steps, and serialized field order.
+Modules read the shared configuration rather than keeping independent copies.
+
+| Page / setting | Default | Allowed range | Knob step |
+|---|---:|---:|---:|
+| Display / Screen FPS | 60 | 20–120 | 1 |
+| Display / Animation delay | 300 s (5 min) | 10–3,600 s | 10 s |
+| Display / Screen reset | 60 s | 60–3,600 s | 60 s |
+| Display / Contrast | 79 | 1–255 | 1 |
+| Display / Status badges | On | Off / On (0 / 1) | 1 |
+| Display / Show splash | Off | Off / On (0 / 1) | 1 |
+| Keyboard / Key capture | Off | Off / On (0 / 1) | 1 |
+| Keyboard / Game mode | Off | Off / On (0 / 1) | 1 |
+
+**Display → Show splash → 1**, followed by **Save & exit**, replaces animations
+with the centered tree and `forestboard` indefinitely. The setting persists;
+return to the menu and save 0 to resume animations. Menu rendering takes priority,
+and hidden game controls do not consume typing. Diagnostic builds retain their
+isolation scene. Version-1 snapshots load with Show splash off. Version-1/2
+snapshots retain existing settings and count when upgrading to version 3; appended
+animation fields take defaults. Version 3 packs each bounded setting into 16 bits,
+retaining the 64-byte snapshot size and CRC coverage. Invalid or conflicting
+physical bindings are rejected before a write and during boot validation.
+
+FPS is a scheduling ceiling, rounded up to a whole-millisecond interval. The
+20 FPS minimum matches the bike simulation's 50 ms maximum timestep. Actual
+panel throughput depends on software SPI and scene rendering. Contrast changes
+are applied on the next rendered frame after saving, without a hardware reset.
 
 ## OLED configuration and isolation mode
 
-OLED behavior is parameterized in `include/config/firmware_config.h`. Every default
-can be overridden with a PlatformIO `-D` build flag:
+Only hardware and diagnostic build options remain in
+`include/config/firmware_config.h`; runtime tuning uses the shared settings model:
 
 | Build setting | Production default | Purpose |
 |---|---:|---|
-| `ERGOBOARD_OLED_FRAME_INTERVAL_MS` | `8` | Target display update interval (125 FPS) |
-| `ERGOBOARD_OLED_SPI_HZ` | `3000000` | Hardware SPI clock request, capped at 4 MHz |
-| `ERGOBOARD_OLED_SOFTWARE_SPI` | `0` | Set to `1` for the previous software-SPI transport (slower) |
-| `ERGOBOARD_OLED_REFRESH_MS` | `2000` | Reassert controller configuration without blanking |
-| `ERGOBOARD_OLED_SHADING` | `1` | Spatial dither shading on animations |
-| `ERGOBOARD_OLED_DEBUG_FRAME_INTERVAL_MS` | `750` | Diagnostic update interval |
-| `ERGOBOARD_OLED_ANIMATION_DURATION_MS` | `300000` | Time before automatic animation rotation |
-| `ERGOBOARD_OLED_META_KEY_BADGES` | `1` | Enable the `NL/INS/DBG/FN` badges |
-| `ERGOBOARD_OLED_DEBUG_MODE` | `0` | Replace all animations with the isolation scene |
+| `FORESTBOARD_OLED_SPI_HZ` | `3000000` | Hardware SPI clock request, capped at 4 MHz |
+| `FORESTBOARD_OLED_SOFTWARE_SPI` | `1` | Software SPI; required with the installed STM32 driver |
+| `FORESTBOARD_OLED_DEBUG_FRAME_INTERVAL_MS` | `750` | Diagnostic update interval |
+| `FORESTBOARD_OLED_DEBUG_MODE` | `0` | Replace all animations with the isolation scene |
 
 The OLED-debug environments keep the normal 1 ms matrix scanner and USB HID,
 but bypass regular animations, reactive effects, key-capture painting, and
@@ -114,21 +168,25 @@ The [SH1107 datasheet](https://cdn-shop.adafruit.com/product-files/5297/SH1107V2
 (pp. 35, 47, 52, 55) gives a nominal 720 kHz oscillator, up to +50% adjustment,
 54 clocks per common, and 128 commons: `720000 * 1.5 / (54 * 128) = 156.25 Hz`.
 Clock setting `0xF0` selects that oscillator setting with divide-by-one. The
-125 FPS target is 80% of this calculated rate, not a measured or guaranteed
-panel refresh rate. The oscillator has no specified min/max in that table.
+60 FPS default and 120 FPS maximum are scheduling limits, not measured or
+guaranteed panel refresh rates. The oscillator has no specified min/max in that table.
 Actual frame throughput still needs verification on the assembled board.
 
-SPI2 explicitly uses PB15 MOSI and PB13 clock with **no MISO**; PB14 remains
-D/C. At the configured MCU clocks, a 3 MHz request gives 3 MHz on F411 and
-2.8125 MHz on F446, below the display's 4 MHz limit at 3.3 V. Each frame sends
-16 separately addressed 128-byte pages, servicing the keyboard between pages.
-The software-SPI fallback retains the exact wiring but cannot promise 125 FPS.
+Software SPI uses PB15 MOSI and PB13 clock; PB14 remains D/C. The installed
+STM32 hardware-SPI driver requires a valid MISO pin: using `PNUM_NOT_DEFINED`
+causes initialization to return without a peripheral, and the first transfer
+faults during display startup. USB can enumerate before that fault while the
+keyboard main loop never starts. Keep `FORESTBOARD_OLED_SOFTWARE_SPI=1` until a
+compatible hardware transport is implemented and tested on the board.
+Each frame sends 16 separately addressed 128-byte pages, servicing the keyboard
+between pages. Software SPI cannot promise the selected FPS ceiling, and
+`FORESTBOARD_OLED_SPI_HZ` only applies to the disabled hardware transport.
 Animation motion uses elapsed time instead of speeding up with refresh rate.
 
-Every two seconds the firmware restores addressing, orientation, contrast,
+Once per minute by default (adjustable in Settings), the firmware restores addressing, orientation, contrast,
 and timing without sending display-off/reset commands. Every frame rewrites
-all display RAM. This repairs common silent corruption without a periodic
-flash. Hardware reset is reserved for the manual chord or reported transfer/
+all display RAM. This attempts to repair silent controller corruption; visual behavior still
+needs verification on the physical panel. Hardware reset is reserved for the manual chord or reported transfer/
 initialization failures, with nonblocking 100 ms power settling and a complete
 frame before display-on. Startup white tests and multi-second reset delays
 are removed. SPI provides no panel acknowledgement: firmware cannot detect
@@ -136,12 +194,39 @@ all wiring noise, power faults, or a disconnected panel; persistent problems
 still need an electrical check.
 
 Game mode pauses automatic animation rotation. Select the mountain-bike scene
-with `Fn` + encoder, then hold `Layout/Game` to play. In that scene, `↑`/`↓`
-change lanes, `J` places a ramp ahead, and `B`/`C`/`T` perform backflip/cancan/360
-while airborne with enough time to finish. Those six controls are consumed
-only when Game mode and the bike scene are both active; other keys type
-normally. Consumed keys remain suppressed until released, even if the mode
-key is released first. Bindings follow the logical letters in both CMK/QTY.
+with `Fn` + encoder, then enable **Settings → Keyboard → Game mode** and save.
+Ramps spawn automatically at randomized intervals in Game mode, even without
+keypresses. Defaults are 60 px/s rider speed and a 1,600 ms average spawn gap
+(randomized to 75–125%; most ramps are in the rider's lane).
+
+**Settings → Animations → Mountain bike** exposes speed (20–140 px/s), jump gap
+(500–5,000 ms), and all seven physical control bindings. The defaults are:
+
+| Action | Colemak physical position | QWERTY physical position |
+|---|---|---|
+| Backflip | A | A |
+| Cancan | R | S |
+| 360 | S | D |
+| Wheelie | T | F |
+| Extra ramp | D | G |
+| Lane up / down | Up / Down | Up / Down |
+
+Bindings use the switch's canonical physical usage before layout translation;
+they do not move when CMK/QTY changes. Select a binding, press a physical key or
+use the knob, then Enter/click to accept and **Save & exit** to persist. Escape
+cancels. Arrow keys can be bound; Enter/Escape, modifiers, Fn, Layout and encoder
+push remain reserved. Duplicate assignments block saving. Only assigned controls
+are consumed while the bike scene and Game mode are active; held captured keys
+remain suppressed until release, even after changing modes. A ground wheelie
+raises and lowers the front tire over 1.2 seconds, and completed wheelies count
+toward the scene's trick score. Taking a ramp interrupts a wheelie smoothly.
+
+**Settings → Animations → Warp tunnel / Curved tunnel** independently controls
+warp speed (25–400%, default 150%) and ring density (3–16, default 8 / 7).
+Speed changes preserve the travel phase, and ring spacing adjusts to the count.
+
+As the bike approaches a ramp, the front wheel climbs its slope while the rear
+tire stays grounded; takeoff carries the upward pitch smoothly into flight.
 Outside Game mode, typing produces occasional random bike actions and all keys
 retain normal host output.
 

@@ -8,19 +8,19 @@ constexpr uint32_t kMosi = PB15;
 constexpr uint32_t kDc = PB14;
 constexpr uint32_t kClock = PB13;
 constexpr uint32_t kCs = PB12;
-#if !ERGOBOARD_OLED_SOFTWARE_SPI
+#if !FORESTBOARD_OLED_SOFTWARE_SPI
 // Explicit SPI2 pins, with MISO disconnected: PB14 must remain OLED D/C.
 SPIClass oledSpi(kMosi, PNUM_NOT_DEFINED, kClock);
 #endif
 } // namespace
 
-#if ERGOBOARD_OLED_SOFTWARE_SPI
+#if FORESTBOARD_OLED_SOFTWARE_SPI
 OledTransport::OledTransport()
     : Adafruit_SH1107(128, 128, kMosi, kClock, kDc, kReset, kCs) {}
 #else
 OledTransport::OledTransport()
     : Adafruit_SH1107(
-          128, 128, &oledSpi, kDc, kReset, kCs, ERGOBOARD_OLED_SPI_HZ) {}
+          128, 128, &oledSpi, kDc, kReset, kCs, FORESTBOARD_OLED_SPI_HZ) {}
 #endif
 
 bool OledTransport::allocate() {
@@ -52,7 +52,7 @@ bool OledTransport::configure(bool isAfterReset) {
       0xF0,
       0x20,
       0x81,
-      0x4F,
+      static_cast<uint8_t>(configuration().contrast()),
       0xA0,
       0xC0,
       0xDC,
@@ -73,6 +73,11 @@ bool OledTransport::configure(bool isAfterReset) {
 
 bool OledTransport::powerOn() {
   const uint8_t command = SH110X_DISPLAYON;
+  return oled_commandList(&command, 1);
+}
+
+bool OledTransport::powerOff() {
+  const uint8_t command = SH110X_DISPLAYOFF;
   return oled_commandList(&command, 1);
 }
 

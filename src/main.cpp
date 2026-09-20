@@ -22,6 +22,7 @@ DisplayStatus currentDisplayStatus() {
       inputController.isKeyCaptureActive(),
       inputController.isKeyActive(KeyboardKey::Function),
       inputController.isGameModeActive(),
+      &inputController.settingsMenu(),
   };
 }
 
@@ -67,6 +68,10 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   inputController.service(now);
+  inputController.serviceSettings();
+  if (inputController.takeActivity()) {
+    displayController.onActivity(now);
+  }
   if (inputController.takeDisplayRecoveryRequest()) {
     displayController.requestRecovery();
   }

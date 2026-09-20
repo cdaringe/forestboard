@@ -1,7 +1,9 @@
 #pragma once
 #include "Arduino.h"
+#include <string>
 constexpr int SH110X_WHITE = 1, SH110X_BLACK = 0;
 constexpr uint8_t SH110X_DISPLAYON = 0xAF;
+constexpr uint8_t SH110X_DISPLAYOFF = 0xAE;
 inline std::vector<std::vector<uint8_t>> oledCommands;
 inline bool failOled = false;
 inline unsigned pageWrites = 0;
@@ -18,6 +20,7 @@ public:
   virtual ~Adafruit_SH1107() = default;
   void clearDisplay() {
     memset(pixels, 0, sizeof pixels);
+    lastText.clear();
   }
   uint8_t* getBuffer() {
     return pixels;
@@ -72,7 +75,9 @@ public:
       drawLine(x, y, x, y + h - 1, c);
     }
   }
+  unsigned rectCalls = 0, ellipseCalls = 0;
   void drawRect(int x, int y, int w, int h, int c) {
+    ++rectCalls;
     drawFastHLine(x, y, w, c);
     drawFastHLine(x, y + h - 1, w, c);
     drawFastVLine(x, y, h, c);
@@ -89,6 +94,7 @@ public:
     drawLine(u, v, x, y, c);
   }
   void drawEllipse(int x, int y, int rx, int ry, int c) {
+    ++ellipseCalls;
     if (rx < 0 || ry < 0) {
       return;
     }
@@ -118,7 +124,15 @@ public:
   void setTextSize(int) {}
   void setTextColor(int) {}
   void setTextWrap(bool) {}
-  void setCursor(int, int) {}
+  int cursorX = 0, cursorY = 0;
+  std::string lastText;
+  void setCursor(int x, int y) {
+    cursorX = x;
+    cursorY = y;
+  }
+  void print(const char* text) {
+    lastText = text;
+  }
   template <class T> void print(T) {}
 
 protected:

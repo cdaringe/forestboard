@@ -7,7 +7,7 @@ Public project headers mirror the module hierarchy under src/:
     display/                Controller, panel transport, and status snapshot
     display/animations/     Scene interfaces, registry, timing, and math
     display/diagnostics/    Isolation renderer
-    display/effects/        Shading and milestone overlays
+    display/effects/        Milestone overlays
     display/widgets/       Status badges and capture text
 
 Include headers using their category, for example:

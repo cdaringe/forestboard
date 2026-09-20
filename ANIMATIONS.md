@@ -54,24 +54,36 @@ For electrical and rendering isolation, the `*_oled_debug` PlatformIO
 environments bypass this registry entirely and render only the deterministic
 slow test scene in `oled_diagnostic_renderer.cpp`.
 
-The production refresh target is 125 FPS. `AnimationClock` expresses motion in
+The refresh scheduling default is 60 FPS (settings range 20–120 FPS); the current software-SPI transport
+does not guarantee that throughput. `AnimationClock` expresses motion in
 fractions of the old 200 ms frame duration, preserving pace while permitting
 intermediate positions. Life generations and energy decay use timed ticks.
 Animations with typing effects still receive bounded `onKeystroke()` batches.
-`onKeyPress(usage, isGameMode)` additionally supplies logical HID key usages;
+`onKeyPress(usage, isGameMode)` supplies logical HID usages for ambient typing
+and stable bike action IDs for captured physical game controls;
 `isInteractive()` identifies scenes whose game controls should be captured.
 
 Mountain bike replaces Breakout at index 9. Normal typing has occasional random
-effects. Hold `Layout/Game` for the `GAME` badge and direct controls: arrows
-change lanes, `J` adds a jump, and `B`, `C`, `T` trigger a backflip, cancan or
-360 in the air. Release the mode key to resume ambient riding. A landed-trick
-counter rewards completed airborne tricks. Game mode pauses auto-rotation.
+effects. Enable **Settings → Keyboard → Game mode** and save for direct controls:
+ramps spawn automatically at randomized intervals. Physical Colemak A/R/S/T
+positions trigger backflip/cancan/360/wheelie; adjacent D adds a ramp. These are
+QWERTY ASDFG positions and do not change when switching layouts. Arrow keys change
+lanes. All seven bindings, rider speed, and average ramp interval are persisted
+through **Settings → Animations → Mountain bike**. Binding editors capture the
+physical key, validate it, and reject conflicting assignments on save. Wheelies
+raise the front tire smoothly around a grounded rear axle and end after 1.2 s;
+a ramp interrupts them while preserving the takeoff pitch. Disable Game mode in the menu to resume ambient riding.
+Holding the layout key opens Settings; it never toggles Game mode directly.
+A landed-trick counter rewards completed airborne tricks. Game mode pauses
+animation auto-rotation. The bike pitches around the rear axle as its front
+wheel climbs the ramp, then carries that pitch into takeoff and levels smoothly.
 
-A shared shading pass preserves bright outlines, adds sparse dithered halos,
-and textures solid interiors. It uses a fixed spatial pattern on the one-bit
-panel, not temporal grayscale, to avoid flicker. Status badges and capture
-text are painted afterward and stay crisp. Set `ERGOBOARD_OLED_SHADING=0` to
-compare with the original rendering; the diagnostic scene bypasses shading.
+Hyperspace and curved tunnels have independent **Warp speed** and **Ring density**
+settings under **Settings → Animations**. Defaults are 150% speed and 8/7 rings;
+limits are 25–400% and 3–16 rings. Particle motion and ring travel use the speed
+multiplier. Accumulated phases preserve continuity across changes and wrap cleanly.
+
+Scenes render directly without a global shading or halo pass.
 
 Shooting stars launch from varied positions along all four scene edges. Active
 flights are never replaced by incoming keypresses. If all 18 flight slots are

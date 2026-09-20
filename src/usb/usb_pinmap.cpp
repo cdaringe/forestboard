@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <PeripheralPins.h>
 
-#if defined(ERGOBOARD_KEYBOARD_MODE) && defined(USB_OTG_FS)
+#if defined(FORESTBOARD_KEYBOARD_MODE) && defined(USB_OTG_FS)
 
 // STM32duino's generic F411/F446 USB table also configures PA8 (SOF), PA9
 // (VBUS), and PA10 (ID). This board uses device-mode USB with VBUS sensing and

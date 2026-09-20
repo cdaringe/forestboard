@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../../src/keyboard-fw"
+		},
+		{
+			"name": "forestboard",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

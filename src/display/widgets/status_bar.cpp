@@ -36,7 +36,7 @@ void StatusBar::render(
     drawFilledBadgeAt(display, "GAME", display.width() - 29,
         bottomBadgeY - kBadgeHeight - kBadgeGap);
   }
-  if (!firmwareConfig::isOledMetaKeyBadgesEnabled) {
+  if (!configuration().metaBadges()) {
     return;
   }
   if (status.isNumLockActive) {

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "settings/settings_menu.h"
 #include "storage/keystroke_counter.h"
 
 enum class KeyboardKey : uint8_t {
@@ -14,7 +15,12 @@ enum class KeyboardKey : uint8_t {
 class InputController {
 public:
   void begin();
+  void serviceSettings();
+  const SettingsMenu& settingsMenu() const {
+    return settingsMenu_;
+  }
   void service(uint32_t now);
+  bool takeActivity();
   bool isRawKeyActive() const;
   bool isNumLockActive() const;
   bool isInsertModeActive() const;
@@ -45,11 +51,11 @@ private:
   ScanResult scanKey(uint8_t row, uint8_t col, uint32_t now);
   bool isDebounceComplete(
       uint8_t row, uint8_t col, bool isPressed, uint32_t now) const;
-  bool isGameHoldDue(uint32_t now) const;
-  void updateGameMode(uint32_t now);
+  bool isSettingsHoldDue(uint32_t now) const;
+  void updateSettingsMenu(uint32_t now);
   void beginLayoutKeyPress(uint32_t now);
   void finishLayoutKeyPress();
-  void queueAnimationKey(uint8_t usage);
+  void queueAnimationKey(uint8_t usage, bool isGameInput);
   void captureAnimationKey(uint8_t row, uint8_t col);
   void updateNumLockGesture(uint8_t row, uint8_t col, uint32_t now);
   bool isNumLockGestureComplete() const;
@@ -86,12 +92,11 @@ private:
   int8_t pendingEncoderSteps_ = 0;
   int8_t pendingAnimationSteps_ = 0;
   bool isRawKeyActive_ = false;
+  bool isActivityPending_ = false;
   bool isInsertModeActive_ = false;
-  bool isKeyCaptureActive_ = false;
   bool isLayoutKeyUsedForRecovery_ = false;
   bool isDisplayRecoveryPending_ = false;
-  bool isGameModeActive_ = false;
-  bool isLayoutKeyHeldForGame_ = false;
+  bool isLayoutKeyHeldForSettings_ = false;
   bool isInteractiveAnimation_ = false;
   uint32_t layoutKeyPressedAt_ = 0;
   bool isCapturedForGame_[12][12] = {};
@@ -108,4 +113,5 @@ private:
   char keyCaptureText_[22] = {};
   KeyboardLayout activeLayout_ = KeyboardLayout::Colemak;
   KeystrokeCounter keystrokeCounter_;
+  SettingsMenu settingsMenu_;
 };

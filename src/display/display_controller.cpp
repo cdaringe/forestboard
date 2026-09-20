@@ -1,19 +1,32 @@
 #include "display/display_controller.h"
 
 #include "config/firmware_config.h"
-#include "display/effects/oled_shading.h"
+#include "display/widgets/boot_splash.h"
+#include "settings/settings_menu.h"
+
+namespace {
+constexpr uint32_t kBootSplashDurationMs = 3000;
+} // namespace
 
 DisplayController::DisplayController() = default;
 
 void DisplayController::begin(void (*serviceInput)()) {
   serviceInput_ = serviceInput;
+  isSplashPending_ = true;
+  isSplashVisible_ = false;
   if (firmwareConfig::isOledDebugMode) {
     diagnosticRenderer_.reset();
   } else {
     animationManager_.begin();
   }
   lastAnimationChangeAt_ = millis();
+  onActivity(millis());
   startRecovery(millis());
+}
+
+void DisplayController::onActivity(uint32_t now) {
+  lastActivityAt_ = now;
+  isIdle_ = false;
 }
 
 void DisplayController::requestRecovery() {
@@ -21,13 +34,14 @@ void DisplayController::requestRecovery() {
 }
 
 void DisplayController::onKeyPress(uint8_t usage, bool isGameMode) {
-  if (!firmwareConfig::isOledDebugMode) {
+  if (!firmwareConfig::isOledDebugMode && !configuration().showSplash()) {
     animationManager_.onKeyPress(usage, isGameMode);
   }
 }
 
 bool DisplayController::isInteractiveAnimation() const {
-  return !firmwareConfig::isOledDebugMode && animationManager_.isInteractive();
+  return !isSplashPending_ && !configuration().showSplash() &&
+      !firmwareConfig::isOledDebugMode && animationManager_.isInteractive();
 }
 
 void DisplayController::startRecovery(uint32_t now) {
@@ -45,6 +59,7 @@ void DisplayController::startRecovery(uint32_t now) {
   if (!display_.configure(true)) {
     return;
   }
+  configuredContrast_ = configuration().contrast();
   recoveryStartedAt_ = millis();
   isRecovering_ = true;
 }
@@ -60,11 +75,15 @@ bool DisplayController::isPowerSettled(uint32_t now) const {
 }
 
 bool DisplayController::isFrameDue(uint32_t now) const {
-  return isReady_ && now - lastFrameAt_ >= firmwareConfig::oledFrameIntervalMs;
+  return isReady_ &&
+      now - lastFrameAt_ >= (firmwareConfig::isOledDebugMode
+                                    ? firmwareConfig::oledDebugFrameIntervalMs
+                                    : configuration().frameIntervalMs());
 }
 
 bool DisplayController::isConfigurationRefreshDue(uint32_t now) const {
-  return now - lastRefreshAt_ >= firmwareConfig::oledRefreshMs;
+  return configuredContrast_ != configuration().contrast() ||
+      now - lastRefreshAt_ >= configuration().refreshIntervalMs();
 }
 
 void DisplayController::serviceRecovery(uint32_t now) {
@@ -93,15 +112,24 @@ void DisplayController::renderAnimationFrame(
     uint32_t now, const DisplayStatus& status) {
   forwardNewKeystrokes(status.keystrokeCount);
   animationManager_.render(display_, now);
-  if (firmwareConfig::isOledShading) {
-    applyOledShading(display_);
-  }
   keyCaptureOverlay_.render(
       display_, status.isKeyCaptureActive, status.capturedKeys);
   milestoneEffect_.render(display_, now);
 }
 
 void DisplayController::renderScene(uint32_t now, const DisplayStatus& status) {
+  if (isSplashPending_) {
+    drawBootSplash(display_);
+    return;
+  }
+  if (status.settingsMenu != nullptr && status.settingsMenu->isOpen()) {
+    status.settingsMenu->render(display_);
+    return;
+  }
+  if (!firmwareConfig::isOledDebugMode && configuration().showSplash()) {
+    drawBootSplash(display_);
+    return;
+  }
   if (firmwareConfig::isOledDebugMode) {
     diagnosticRenderer_.render(display_, now);
   } else {
@@ -115,6 +143,7 @@ void DisplayController::refreshConfiguration(uint32_t now) {
     requestRecovery();
     return;
   }
+  configuredContrast_ = configuration().contrast();
   lastRefreshAt_ = now;
 }
 
@@ -134,26 +163,58 @@ void DisplayController::sendFrame(bool isPowerOnNeeded) {
     requestRecovery();
     return;
   }
+  isPoweredOff_ = false;
   isRecovering_ = false;
 }
 
 void DisplayController::render(uint32_t now, const DisplayStatus& status) {
+  const uint32_t idleTimeoutMs = configuration().idleSeconds() * 1000U;
+  // Latch sleep until activity so millis() wrapping cannot wake the panel.
+  isIdle_ =
+      idleTimeoutMs != 0 && (isIdle_ || now - lastActivityAt_ >= idleTimeoutMs);
+  if (isIdle_) {
+    if (isAllocated_ && !isPoweredOff_) {
+      isPoweredOff_ = display_.powerOff();
+    }
+    return; // No animation, refresh, or recovery traffic while idle.
+  }
   serviceRecovery(now);
-  if (!isFrameDue(now)) {
+  const bool isSplashFinished = isSplashPending_ && isSplashVisible_ &&
+      now - splashShownAt_ >= kBootSplashDurationMs;
+  if (isSplashFinished) {
+    isSplashPending_ = false;
+    lastAnimationChangeAt_ = now;
+  }
+  if (!isFrameDue(now) && !((isSplashFinished || isPoweredOff_) && isReady_)) {
     return;
   }
   lastFrameAt_ = now;
-  updateAnimationSelection(now, status.isGameModeActive);
+  const bool menuOpen =
+      status.settingsMenu != nullptr && status.settingsMenu->isOpen();
+  updateAnimationSelection(now,
+      status.isGameModeActive || menuOpen || isSplashPending_ ||
+          configuration().showSplash());
+  if (menuOpen || isSplashPending_ || configuration().showSplash()) {
+    lastObservedKeystrokeCount_ = status.keystrokeCount;
+  }
   renderScene(now, status);
   const bool isRefreshDue = isConfigurationRefreshDue(now);
   if (isRefreshDue) {
     refreshConfiguration(now);
   }
-  sendFrame(isRecovering_ || isRefreshDue);
+  sendFrame(isRecovering_ || isRefreshDue || isPoweredOff_);
+  if (isSplashPending_ && !isSplashVisible_ && !isRecoveryRequested_ &&
+      !isRecovering_) {
+    // Count three visible seconds after transfer and display-on, not during
+    // setup.
+    splashShownAt_ = millis();
+    isSplashVisible_ = true;
+  }
 }
 
 void DisplayController::stepAnimation(uint32_t now, int8_t direction) {
-  if (!isReady_ || firmwareConfig::isOledDebugMode || direction == 0) {
+  if (!isReady_ || firmwareConfig::isOledDebugMode ||
+      configuration().showSplash() || direction == 0) {
     return;
   }
 
@@ -167,14 +228,14 @@ void DisplayController::stepAnimation(uint32_t now, int8_t direction) {
 
 void DisplayController::celebrateKeystrokeMilestone(
     uint32_t now, uint32_t keystrokeCount) {
-  if (firmwareConfig::isOledDebugMode) {
+  if (firmwareConfig::isOledDebugMode || configuration().showSplash()) {
     return;
   }
   milestoneEffect_.start(now, keystrokeCount);
 }
 
 void DisplayController::rotateAnimationWhenDue(uint32_t now) {
-  if (now - lastAnimationChangeAt_ < firmwareConfig::oledAnimationDurationMs) {
+  if (now - lastAnimationChangeAt_ < configuration().animationDurationMs()) {
     return;
   }
   animationManager_.next();

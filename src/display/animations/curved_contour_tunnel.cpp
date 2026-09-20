@@ -1,9 +1,9 @@
+#include "config/configuration.h"
 #include "display/animations/animation.h"
 #include "display/animations/animation_clock.h"
 
 namespace {
 
-constexpr uint8_t kContourCount = 7;
 constexpr uint8_t kParticleCount = 20;
 constexpr uint8_t kTravelSpeed = 5;
 constexpr int16_t kMinimumContourRadius = 9;
@@ -98,6 +98,7 @@ public:
 
   void reset() override {
     clock_.reset();
+    ringPhase_ = 0;
     frame_ = 0;
     randomState_ = 0x7A11C0DE;
     for (uint8_t index = 0; index < kParticleCount; ++index) {
@@ -108,7 +109,11 @@ public:
 
   void render(Adafruit_SH1107& display, uint32_t now) override {
     const float delta = clock_.advance(now);
-    (void)delta;
+    const float speed = configuration().curvedSpeed() / 100.0f;
+    ringPhase_ += 4 * delta * speed;
+    if (ringPhase_ >= 256) {
+      ringPhase_ -= 256;
+    }
     display.clearDisplay();
 
     drawTrajectoryRails(display);
@@ -119,6 +124,7 @@ public:
 
 private:
   AnimationClock clock_;
+  float ringPhase_ = 0;
   static int16_t sine(uint8_t phase) {
     return sineTable[phase >> 2];
   }
@@ -142,8 +148,10 @@ private:
   }
 
   void drawContours(Adafruit_SH1107& display) const {
-    for (uint8_t index = 0; index < kContourCount; ++index) {
-      const uint8_t depthPhase = clock_.phase(4, index * 36);
+    for (uint8_t index = 0; index < configuration().curvedRings(); ++index) {
+      const uint8_t depthPhase =
+          static_cast<uint8_t>(static_cast<uint32_t>(ringPhase_) +
+              index * 256 / configuration().curvedRings());
       const TunnelSlice slice = sliceAt(depthPhase);
 
       // Tiny distant rings made the vanishing point noisy. The trajectory
@@ -206,7 +214,8 @@ private:
 
   void drawPassingLights(Adafruit_SH1107& display, float delta) {
     for (LightParticle& particle : particles_) {
-      particle.depth += kTravelSpeed * delta;
+      particle.depth +=
+          kTravelSpeed * delta * configuration().curvedSpeed() / 100.0f;
 
       if (particle.depth >= 256.0f) {
         particle.depth -= 256.0f;

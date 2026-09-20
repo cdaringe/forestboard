@@ -1,3 +1,4 @@
+#include "config/configuration.h"
 #include "display/animations/animation.h"
 #include "display/animations/animation_clock.h"
 
@@ -7,7 +8,6 @@ constexpr int16_t kCenterX = 64;
 constexpr int16_t kCenterY = 64;
 constexpr int16_t kFocalLength = 96;
 constexpr uint8_t kStarCount = 28;
-constexpr uint8_t kRingCount = 8;
 constexpr int16_t kNearDepth = 10;
 constexpr int16_t kFarDepth = 255;
 constexpr int16_t kTravelSpeed = 6;
@@ -26,6 +26,7 @@ public:
 
   void reset() override {
     clock_.reset();
+    ringPhase_ = 0;
     randomState_ = 0xC0FFEE42;
     frame_ = 0;
     for (uint8_t index = 0; index < kStarCount; ++index) {
@@ -35,7 +36,11 @@ public:
 
   void render(Adafruit_SH1107& display, uint32_t now) override {
     const float delta = clock_.advance(now);
-    (void)delta;
+    const float speed = configuration().warpSpeed() / 100.0f;
+    ringPhase_ += 5 * delta * speed;
+    if (ringPhase_ >= 256) {
+      ringPhase_ -= 256;
+    }
     display.clearDisplay();
 
     const int16_t centerX = kCenterX + triangleWave(frame_, 160, 4);
@@ -55,6 +60,7 @@ public:
 
 private:
   AnimationClock clock_;
+  float ringPhase_ = 0;
   static int16_t triangleWave(
       uint32_t frame, uint16_t period, int16_t amplitude) {
     const uint16_t phase = frame % period;
@@ -88,7 +94,7 @@ private:
   void drawStars(
       Adafruit_SH1107& display, int16_t centerX, int16_t centerY, float delta) {
     for (Star& star : stars_) {
-      star.z -= kTravelSpeed * delta;
+      star.z -= kTravelSpeed * delta * configuration().warpSpeed() / 100.0f;
       if (star.z <= kNearDepth) {
         resetStar(star);
         continue;
@@ -115,8 +121,10 @@ private:
 
   void drawTunnelRings(
       Adafruit_SH1107& display, int16_t centerX, int16_t centerY) const {
-    for (uint8_t index = 0; index < kRingCount; ++index) {
-      const uint16_t phase = clock_.phase(5, index * 32);
+    for (uint8_t index = 0; index < configuration().warpRings(); ++index) {
+      const uint16_t phase =
+          static_cast<uint8_t>(static_cast<uint32_t>(ringPhase_) +
+              index * 256 / configuration().warpRings());
       const int16_t halfSize =
           2 + static_cast<uint32_t>(phase) * phase * 61 / 65025;
 

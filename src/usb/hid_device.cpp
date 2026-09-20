@@ -2,7 +2,7 @@
 
 #include "usb/hid_device.h"
 
-#if defined(ERGOBOARD_KEYBOARD_MODE)
+#if defined(FORESTBOARD_KEYBOARD_MODE)
 
 #include <cstring>
 
@@ -307,4 +307,4 @@ bool sendUsbConsumerReport(uint8_t) {
   return false;
 }
 
-#endif // ERGOBOARD_KEYBOARD_MODE
+#endif // FORESTBOARD_KEYBOARD_MODE
