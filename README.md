@@ -3,8 +3,8 @@
 Firmware for a custom fixed-split keyboard with a rotary encoder and OLED screen.
 Supports Colemak/QWERTY switching, volume controls, animations, and settings saved on the keyboard.
 
-<a href="./assets/forest_board_1.jpg"><img src="./assets/forest_board_1.jpg" alt="Forestboard keyboard, view 1" width="320"></a>
-<a href="./assets/forest_board_2.jpg"><img src="./assets/forest_board_2.jpg" alt="Forestboard keyboard, view 2" width="320"></a>
+<a href="./assets/forest_board_1.jpg"><img src="./assets/forest_board_1.jpg" alt="Forestboard keyboard, view 1" width="400"></a>
+<a href="./assets/forest_board_2.jpg"><img src="./assets/forest_board_2.jpg" alt="Forestboard keyboard, view 2" width="400"></a>
 
 Built for the WeAct STM32F411RE CoreBoard, with STM32F446RE support.
 
