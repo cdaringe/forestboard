@@ -11,6 +11,24 @@
 #include "display/display_controller.h"
 #include "keyboard/input_controller.h"
 #undef private
+#include "../../src/main.cpp"
+
+static bool isHostPacketPending = false;
+static bool isHostPacketAccepted = false;
+static unsigned hostPacketsProcessed = 0;
+static uint8_t hostPacket[hostDisplay::packetSize] = {};
+bool takeUsbDisplayPacket(uint8_t* packet) {
+  if (!isHostPacketPending) {
+    return false;
+  }
+  memcpy(packet, hostPacket, sizeof(hostPacket));
+  return true;
+}
+void finishUsbDisplayPacket(bool accepted) {
+  isHostPacketAccepted = accepted;
+  isHostPacketPending = false;
+  ++hostPacketsProcessed;
+}
 
 static bool isConsumerBusy = false;
 static std::vector<uint8_t> consumerReports;
@@ -1264,7 +1282,114 @@ static void testCometLaunchLocations() {
   assert(isInteriorEdgeUsed);
 }
 
+static void testHostFrames() {
+  DisplayController controller;
+  using hostDisplay::Opcode;
+  namespace wire = hostDisplay::wireOffset;
+  uint8_t packet[hostDisplay::packetSize] = {};
+  packet[wire::version] = hostDisplay::protocolVersion;
+  packet[wire::frameIdLow] = 7;
+  const auto setOpcode = [&](Opcode opcode) {
+    packet[wire::opcode] = static_cast<uint8_t>(opcode);
+  };
+  setOpcode(Opcode::BeginFrame);
+  assert(controller.receiveHostPacket(packet, 100));
+  setOpcode(Opcode::PresentFrame);
+  assert(!controller.receiveHostPacket(packet, 100)); // Incomplete frame.
+  setOpcode(Opcode::WritePixels);
+  packet[wire::payloadSize] = 57;
+  assert(!controller.receiveHostPacket(packet, 100)); // Oversized chunk.
+  packet[wire::payloadSize] = 1;
+  packet[wire::offsetLow] = 1;
+  assert(!controller.receiveHostPacket(packet, 100)); // Missing offset zero.
+  for (unsigned offset = 0; offset < 2048; offset += 56) {
+    packet[wire::offsetLow] = offset & 255;
+    packet[wire::offsetHigh] = offset >> 8;
+    packet[wire::payloadSize] = min(56U, 2048U - offset);
+    memset(packet + wire::payload, 0, hostDisplay::payloadCapacity);
+    if (offset == 0) {
+      packet[wire::payload] = 0x80;
+      packet[wire::payload + 16] = 0x40;
+    }
+    assert(controller.receiveHostPacket(packet, 100));
+  }
+  assert(!controller.hostFrame_.isActive());
+  setOpcode(Opcode::PresentFrame);
+  packet[wire::offsetLow] = packet[wire::offsetHigh] =
+      packet[wire::payloadSize] = 0;
+  packet[wire::frameIdLow] = 8;
+  assert(!controller.receiveHostPacket(packet, 100)); // Wrong frame ID.
+  packet[wire::frameIdLow] = 7;
+  assert(controller.receiveHostPacket(packet, 100));
+  assert(controller.hostFrame_.isActive());
+  controller.renderScene(100, {});
+  assert(controller.display_.getBuffer()[0] == 1);   // (0, 0)
+  assert(controller.display_.getBuffer()[1] == 2);   // (1, 1)
+  assert(controller.display_.getBuffer()[127] == 0); // No status overlay.
+  SettingsMenu menu;
+  menu.open();
+  DisplayStatus status = {};
+  status.settingsMenu = &menu;
+  controller.renderScene(100, status);
+  assert(!controller.display_.lastText.empty()); // Settings own the screen.
+  controller.renderScene(100, {});
+  assert(controller.display_.lastText.empty()); // Host resumes after menu.
+  setOpcode(Opcode::BeginFrame);
+  assert(controller.receiveHostPacket(packet, 101));
+  assert(controller.hostFrame_.isActive()); // Begin preserves visible frame.
+  controller.hostFrame_.expire(5099);
+  assert(controller.hostFrame_.isActive());
+  controller.hostFrame_.expire(5100);
+  assert(!controller.hostFrame_.isActive());
+  setOpcode(Opcode::ReleaseDisplay);
+  assert(controller.receiveHostPacket(packet, 5101));
+  setOpcode(Opcode::WritePixels);
+  packet[wire::payloadSize] = 1;
+  assert(
+      !controller.receiveHostPacket(packet, 5101)); // Release cancels upload.
+  packet[wire::version] = 2;
+  assert(!controller.receiveHostPacket(packet, 5101));
+}
+
+static void testHostProgressDuringPanelTransfer() {
+  inputController.begin();
+  namespace wire = hostDisplay::wireOffset;
+  hostPacket[wire::version] = hostDisplay::protocolVersion;
+  const auto deliverDuringTransfer = [&](hostDisplay::Opcode opcode) {
+    hostPacket[wire::opcode] = static_cast<uint8_t>(opcode);
+    isHostPacketPending = true;
+    const unsigned processedBefore = hostPacketsProcessed;
+    memset(
+        displayController.display_.getBuffer(), 0x5A, hostDisplay::frameSize);
+    assert(
+        displayController.display_.transferFrame(serviceKeyboardDuringDisplay));
+    assert(!isHostPacketPending && isHostPacketAccepted);
+    assert(hostPacketsProcessed == processedBefore + 1);
+    for (size_t i = 0; i < hostDisplay::frameSize; ++i) {
+      assert(displayController.display_.getBuffer()[i] == 0x5A);
+    }
+  };
+  deliverDuringTransfer(hostDisplay::Opcode::BeginFrame);
+  for (size_t offset = 0; offset < hostDisplay::frameSize;
+      offset += hostDisplay::payloadCapacity) {
+    hostPacket[wire::offsetLow] = offset & 0xFF;
+    hostPacket[wire::offsetHigh] = offset >> 8;
+    hostPacket[wire::payloadSize] =
+        min(hostDisplay::payloadCapacity, hostDisplay::frameSize - offset);
+    memset(hostPacket + wire::payload, 0xFF, hostDisplay::payloadCapacity);
+    deliverDuringTransfer(hostDisplay::Opcode::WritePixels);
+  }
+  hostPacket[wire::offsetLow] = hostPacket[wire::offsetHigh] =
+      hostPacket[wire::payloadSize] = 0;
+  deliverDuringTransfer(hostDisplay::Opcode::PresentFrame);
+  assert(displayController.hostFrame_.isActive());
+  assert(displayController.hostFrame_.pixels()[0] == 0xFF);
+  deliverDuringTransfer(hostDisplay::Opcode::ReleaseDisplay);
+  assert(!displayController.hostFrame_.isActive());
+}
+
 int main() {
+  testHostFrames();
   testCometsFinishDuringTypingBursts();
   testCometLaunchLocations();
   testPhysicalLayout();
@@ -1290,5 +1415,6 @@ int main() {
   testPersistentSplashSetting();
   testScreenTimeout();
   testInputActivity();
+  testHostProgressDuringPanelTransfer();
   puts("Firmware behavior tests passed");
 }

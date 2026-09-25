@@ -12,3 +12,7 @@ void installUsbHidSupport();
 bool isUsbHostNumLockActive();
 
 bool sendUsbConsumerReport(uint8_t buttons);
+
+// Single-packet mailbox: finish only after processing the copied 64 bytes.
+bool takeUsbDisplayPacket(uint8_t* packet);
+void finishUsbDisplayPacket(bool accepted);

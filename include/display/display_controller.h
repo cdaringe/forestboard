@@ -7,6 +7,7 @@
 #include "display/diagnostics/oled_diagnostic_renderer.h"
 #include "display/display_status.h"
 #include "display/effects/keystroke_milestone_effect.h"
+#include "display/host_frame.h"
 #include "display/oled_transport.h"
 #include "display/widgets/key_capture_overlay.h"
 #include "display/widgets/status_bar.h"
@@ -17,6 +18,7 @@ public:
 
   void begin(void (*serviceInput)() = nullptr);
   void requestRecovery();
+  bool receiveHostPacket(const uint8_t* packet, uint32_t now);
   void onActivity(uint32_t now);
   void onKeyPress(uint8_t usage, bool isGameMode);
   bool isInteractiveAnimation() const;
@@ -40,6 +42,7 @@ private:
   void forwardNewKeystrokes(uint32_t keystrokeCount);
 
   OledTransport display_;
+  HostFrame hostFrame_;
   AnimationManager animationManager_;
   KeyCaptureOverlay keyCaptureOverlay_;
   KeystrokeMilestoneEffect milestoneEffect_;

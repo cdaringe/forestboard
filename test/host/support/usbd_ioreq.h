@@ -22,3 +22,5 @@ typedef struct {
   uint8_t (*EP0_RxReady)(USBD_HandleTypeDef*);
 } USBD_ClassTypeDef;
 USBD_StatusTypeDef USBD_CtlPrepareRx(USBD_HandleTypeDef*, uint8_t*, uint32_t);
+
+uint32_t USBD_LL_GetRxDataSize(USBD_HandleTypeDef*, uint8_t);

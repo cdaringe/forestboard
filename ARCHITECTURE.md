@@ -36,7 +36,8 @@ src/
   translation, encoder input, and local gestures. It queues animation input and
   requests; it does not draw. Queued presses retain their original Game mode.
 - **USB** adapts STM32duino's keyboard and Consumer Control interfaces, maintains
-  report storage through transfer completion, and receives host LED state.
+  report storage through transfer completion, and receives host LED state. A
+  bounded Feature-report mailbox carries host display packets into the main loop.
 - **Configuration** is generated from `include/config/settings.def`: one typed
   model, defaults, limits, labels, groups, editor kinds, and storage ordering. All runtime
   consumers read `configuration()`; hardware build options stay separate.
@@ -53,6 +54,9 @@ src/
   Input activity resets its configurable idle timer; sleeping stops panel traffic
   until a key or encoder event wakes it. Keyboard scanning continues during sleep.
   `oled_transport` owns panel pins, SPI, controller commands, and RAM transfers.
+- **Host frames** assemble validated bitmap chunks in RAM and publish complete
+  images to a display-owned scene. Settings have priority; frames expire after
+  five seconds. See [DISPLAY_HOST.md](DISPLAY_HOST.md) for the protocol and sender.
 - **Animations** draw scenes into the shared framebuffer. **Effects** temporarily
   decorate scenes. **Widgets** draw readable state and capture text.
   **Diagnostics** provide a deterministic scene for isolating display faults.
@@ -60,7 +64,7 @@ src/
 Hardware build options live in `include/config/firmware_config.h`. `DisplayStatus`
 is the display's snapshot of keyboard state; the controller does not depend on
 `InputController`. Main supplies a callback that services keyboard input
-between 32-byte OLED bursts. Animation code does not send HID reports or transfer pixels
+between 32-byte OLED bursts and processes one pending host display packet. Animation code does not send HID reports or transfer pixels
 to the panel directly.
 
 Use small named operations and `is*` names for boolean state and predicates.

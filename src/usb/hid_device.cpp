@@ -1,9 +1,11 @@
 #include <Arduino.h>
 
+#include "display/host_protocol.h"
 #include "usb/hid_device.h"
 
 #if defined(FORESTBOARD_KEYBOARD_MODE)
 
+#include <atomic>
 #include <cstring>
 
 extern "C" {
@@ -66,8 +68,37 @@ uint8_t consumerDescriptor[] = {
     0x81,
     0x03, // Five constant padding bits
     0xC0,
+    0x06,
+    0x00,
+    0xFF, // Usage Page (Vendor-defined)
+    0x09,
+    0x01, // Usage (Display)
+    0xA1,
+    0x01, // Application collection
+    0x15,
+    0x00,
+    0x26,
+    0xFF,
+    0x00,
+    0x75,
+    0x08,
+    0x95,
+    0x40,
+    0x09,
+    0x02,
+    0xB1,
+    0x02, // 64-byte Feature (Data, Variable, Absolute)
+    0xC0,
 };
+// Vendor-defined, unnumbered 64-byte Feature report on the non-boot interface.
+// Consumer input remains its original unnumbered one-byte report.
 uint8_t consumerReport = 0; // Keep USB IN storage alive until completion.
+
+uint8_t displayRx[hostDisplay::packetSize] = {};
+uint8_t displayStatus[hostDisplay::packetSize] = {};
+std::atomic<bool> isDisplayPacketPending{false};
+volatile uint8_t displayResult = 0;
+bool isWaitingForDisplayReport = false;
 
 uint8_t keyboardLedRxBuffer = 0;
 volatile uint8_t keyboardLedReport = 0;
@@ -125,6 +156,28 @@ uint8_t receiveKeyboardLeds(USBD_HandleTypeDef* device) {
 
 uint8_t handleKeyboardSetup(
     USBD_HandleTypeDef* device, USBD_SetupReqTypedef* request) {
+  // A new SETUP aborts any unfinished control receive.
+  isWaitingForDisplayReport = false;
+  isWaitingForKeyboardLedReport = false;
+  if (isRequestType(*request, USB_REQ_TYPE_CLASS) &&
+      isRequestForInterface(*request, kConsumerInterface) &&
+      request->wValue == 0x0300) {
+    if (request->bmRequest == 0x21 && request->bRequest == 9 &&
+        request->wLength == sizeof(displayRx) && !isDisplayPacketPending) {
+      isWaitingForDisplayReport = true;
+      return USBD_CtlPrepareRx(device, displayRx, sizeof(displayRx));
+    }
+    if (request->bmRequest == 0xA1 && request->bRequest == 1) {
+      displayStatus[0] = 'F';
+      displayStatus[1] = 'B';
+      displayStatus[2] = 1;
+      displayStatus[3] = isDisplayPacketPending ? 1 : 0;
+      displayStatus[4] = displayResult;
+      return __real_USBD_CtlSendData(device, displayStatus,
+          min(request->wLength, uint16_t{sizeof(displayStatus)}));
+    }
+    return USBD_FAIL;
+  }
   if (isConsumerInputRequest(*request)) {
     const uint16_t length = min(request->wLength, uint16_t{1});
     return __real_USBD_CtlSendData(device, &consumerReport, length);
@@ -139,6 +192,15 @@ uint8_t handleKeyboardSetup(
 }
 
 uint8_t handleKeyboardEp0RxReady(USBD_HandleTypeDef* pdev) {
+  if (isWaitingForDisplayReport) {
+    isWaitingForDisplayReport = false;
+    if (USBD_LL_GetRxDataSize(pdev, 0) != sizeof(displayRx)) {
+      displayResult = 1;
+      return USBD_FAIL;
+    }
+    isDisplayPacketPending = true;
+    return USBD_OK;
+  }
   if (isWaitingForKeyboardLedReport) {
     isWaitingForKeyboardLedReport = false;
     keyboardLedReport = keyboardLedRxBuffer;
@@ -271,6 +333,19 @@ void installUsbHidSupport() {
   USBD_COMPOSITE_HID.EP0_RxReady = handleKeyboardEp0RxReady;
 }
 
+bool takeUsbDisplayPacket(uint8_t* packet) {
+  if (!isDisplayPacketPending) {
+    return false;
+  }
+  memcpy(packet, displayRx, sizeof(displayRx));
+  return true; // Storage stays owned until finishUsbDisplayPacket().
+}
+
+void finishUsbDisplayPacket(bool accepted) {
+  displayResult = accepted ? 0 : 1;
+  isDisplayPacketPending = false;
+}
+
 bool isUsbHostNumLockActive() {
   return (keyboardLedReport & kNumLockLedMask) != 0;
 }
@@ -300,6 +375,10 @@ extern "C" USBD_StatusTypeDef __wrap_USBD_CtlSendData(
 #else
 
 void installUsbHidSupport() {}
+bool takeUsbDisplayPacket(uint8_t*) {
+  return false;
+}
+void finishUsbDisplayPacket(bool) {}
 bool isUsbHostNumLockActive() {
   return false;
 }

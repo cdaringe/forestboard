@@ -5,7 +5,11 @@
 static std::vector<uint8_t> controlReply;
 static uint8_t* ledRx;
 static uint8_t* inFlight;
+static uint32_t rxSize = 64;
 extern "C" {
+uint32_t USBD_LL_GetRxDataSize(USBD_HandleTypeDef*, uint8_t) {
+  return rxSize;
+}
 USBD_ClassTypeDef USBD_COMPOSITE_HID = {};
 USBD_HandleTypeDef hUSBD_Device_HID = {};
 USBD_StatusTypeDef __real_USBD_CtlSendData(
@@ -54,6 +58,7 @@ static void testConsumerDescriptorRequests() {
 
 static void testConsumerDescriptorBits() {
   // Decode HID short items to check three Consumer buttons and exactly 8 bits.
+  unsigned featureBits = 0;
   unsigned bits = 0, reportSize = 0, reportCount = 0;
   std::vector<unsigned> usages;
   for (unsigned i = 0; i < sizeof consumerDescriptor;) {
@@ -73,11 +78,15 @@ static void testConsumerDescriptorBits() {
     if (prefix == 0x09) {
       usages.push_back(value);
     }
+    if (prefix == 0xB1) {
+      featureBits += reportSize * reportCount;
+    }
     if (prefix == 0x81) {
       bits += reportSize * reportCount;
     }
   }
-  assert(bits == 8 && usages == std::vector<unsigned>({1, 0xE2, 0xE9, 0xEA}));
+  assert(bits == 8 && featureBits == 512);
+  assert(usages == std::vector<unsigned>({1, 0xE2, 0xE9, 0xEA, 1, 2}));
 }
 
 static void testHidDescriptorLength() {
@@ -110,6 +119,38 @@ static void testConsumerReportStorage() {
   assert(controlReply == std::vector<uint8_t>{0});
 }
 
+static void testDisplayMailbox() {
+  USBD_SetupReqTypedef set = {0x21, 9, 0x0300, 0, 64};
+  USBD_SetupReqTypedef get = {0xA1, 1, 0x0300, 0, 64};
+  uint8_t packet[64] = {};
+  assert(!takeUsbDisplayPacket(packet));
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &set) == USBD_OK);
+  memset(ledRx, 42, 64);
+  assert(!takeUsbDisplayPacket(packet)); // Wait for completed control transfer.
+  USBD_COMPOSITE_HID.EP0_RxReady(&hUSBD_Device_HID);
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &get) == USBD_OK);
+  assert(controlReply[3] == 1);
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &set) == USBD_FAIL);
+  assert(takeUsbDisplayPacket(packet) && packet[63] == 42);
+  finishUsbDisplayPacket(false);
+  assert(!takeUsbDisplayPacket(packet));
+  USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &get);
+  assert(controlReply[3] == 0 && controlReply[4] == 1);
+  rxSize = 12;
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &set) == USBD_OK);
+  USBD_COMPOSITE_HID.EP0_RxReady(&hUSBD_Device_HID);
+  assert(
+      !takeUsbDisplayPacket(packet)); // Short payload cannot reuse old bytes.
+  rxSize = 64;
+  set.wLength = 65;
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &set) == USBD_FAIL);
+  set.wLength = 64;
+  assert(USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &set) == USBD_OK);
+  USBD_COMPOSITE_HID.Setup(&hUSBD_Device_HID, &get); // Abort receive.
+  USBD_COMPOSITE_HID.EP0_RxReady(&hUSBD_Device_HID);
+  assert(!takeUsbDisplayPacket(packet));
+}
+
 int main() {
   installUsbHidSupport();
   testInterfaceDescriptors();
@@ -117,6 +158,7 @@ int main() {
   testConsumerDescriptorBits();
   testHidDescriptorLength();
   testKeyboardLeds();
+  testDisplayMailbox();
   testConsumerReportStorage();
   puts("USB descriptor/report tests passed");
 }

@@ -2,6 +2,7 @@
 
 #include "display/display_controller.h"
 #include "keyboard/input_controller.h"
+#include "usb/hid_device.h"
 
 namespace {
 
@@ -51,8 +52,20 @@ void updateOnboardActivityLed(uint32_t now) {
 
 } // namespace
 
+void serviceHostDisplay(uint32_t now) {
+  uint8_t displayPacket[hostDisplay::packetSize];
+  if (takeUsbDisplayPacket(displayPacket)) {
+    finishUsbDisplayPacket(
+        displayController.receiveHostPacket(displayPacket, now));
+  }
+}
+
 void serviceKeyboardDuringDisplay() {
-  inputController.service(millis());
+  const uint32_t now = millis();
+  inputController.service(now);
+  // Drain one packet between OLED bursts, keeping USB progress independent of
+  // panel refresh time. Host frames never mutate the panel's transfer buffer.
+  serviceHostDisplay(now);
 }
 
 void setup() {
@@ -69,6 +82,7 @@ void loop() {
   const uint32_t now = millis();
   inputController.service(now);
   inputController.serviceSettings();
+  serviceHostDisplay(now);
   if (inputController.takeActivity()) {
     displayController.onActivity(now);
   }

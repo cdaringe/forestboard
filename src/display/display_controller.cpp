@@ -32,6 +32,17 @@ void DisplayController::begin(void (*serviceInput)()) {
   startRecovery(millis());
 }
 
+bool DisplayController::receiveHostPacket(const uint8_t* packet, uint32_t now) {
+  const auto command = hostDisplay::decodePacket(packet);
+  if (firmwareConfig::isOledDebugMode || !hostFrame_.receive(command, now)) {
+    return false;
+  }
+  if (command.opcode == hostDisplay::Opcode::PresentFrame) {
+    onActivity(now);
+  }
+  return true;
+}
+
 void DisplayController::onActivity(uint32_t now) {
   lastActivityAt_ = now;
   isIdle_ = false;
@@ -50,8 +61,9 @@ void DisplayController::onKeyPress(uint8_t usage, bool isGameMode) {
 }
 
 bool DisplayController::isInteractiveAnimation() const {
-  return !isSplashPending_ && !configuration().showSplash() &&
-      !firmwareConfig::isOledDebugMode && animationManager_.isInteractive();
+  return !hostFrame_.isActive() && !isSplashPending_ &&
+      !configuration().showSplash() && !firmwareConfig::isOledDebugMode &&
+      animationManager_.isInteractive();
 }
 
 void DisplayController::startRecovery(uint32_t now) {
@@ -155,6 +167,18 @@ void DisplayController::renderScene(uint32_t now, const DisplayStatus& status) {
     status.settingsMenu->render(display_);
     return;
   }
+  if (hostFrame_.isActive()) {
+    display_.clearDisplay();
+    const uint8_t* pixels = hostFrame_.pixels();
+    for (int y = 0; y < 128; ++y) {
+      for (int x = 0; x < 128; ++x) {
+        if (pixels[y * 16 + x / 8] & (0x80 >> (x % 8))) {
+          display_.drawPixel(x, y, SH110X_WHITE);
+        }
+      }
+    }
+    return;
+  }
   if (!firmwareConfig::isOledDebugMode && configuration().showSplash()) {
     drawBootSplash(display_);
     return;
@@ -197,6 +221,7 @@ void DisplayController::sendFrame(bool isPowerOnNeeded) {
 }
 
 void DisplayController::render(uint32_t now, const DisplayStatus& status) {
+  hostFrame_.expire(now);
   const uint32_t idleTimeoutMs = configuration().idleSeconds() * 1000U;
   // Latch sleep until activity so millis() wrapping cannot wake the panel.
   isIdle_ =
@@ -222,9 +247,10 @@ void DisplayController::render(uint32_t now, const DisplayStatus& status) {
   const bool menuOpen =
       status.settingsMenu != nullptr && status.settingsMenu->isOpen();
   updateAnimationSelection(now,
-      status.isGameModeActive || menuOpen || isSplashPending_ ||
-          configuration().showSplash());
-  if (menuOpen || isSplashPending_ || configuration().showSplash()) {
+      status.isGameModeActive || hostFrame_.isActive() || menuOpen ||
+          isSplashPending_ || configuration().showSplash());
+  if (hostFrame_.isActive() || menuOpen || isSplashPending_ ||
+      configuration().showSplash()) {
     lastObservedKeystrokeCount_ = status.keystrokeCount;
   }
   renderScene(now, status);

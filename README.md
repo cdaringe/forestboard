@@ -52,3 +52,5 @@ Development checks also require G++, `clang-format`, and `ripgrep`.
 
 More: [architecture](ARCHITECTURE.md), [animations](ANIMATIONS.md),
 [test setup](test/README).
+
+Send images from your computer with the [host display sender](DISPLAY_HOST.md).
