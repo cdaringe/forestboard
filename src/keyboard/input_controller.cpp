@@ -242,47 +242,46 @@ constexpr uint8_t kKeymap[kRows][kCols] = {
         hid::LEFT, hid::RIGHT_CTRL, hid::RIGHT_ALT, hid::NONE, kFn, hid::NONE},
 };
 
-// This machine uses a Colemak host input source. To produce a QWERTY
-// character while that host layout remains active, send the inverse Colemak
-// HID usage. Colemak mode itself sends the canonical matrix usage unchanged.
-uint8_t hidUsageForQwertyCharacterOnColemakHost(uint8_t qwertyUsage) {
-  switch (qwertyUsage) {
-  case hid::F:
-    return hid::E;
-  case hid::P:
-    return hid::R;
-  case hid::G:
-    return hid::T;
-  case hid::J:
-    return hid::Y;
-  case hid::L:
-    return hid::U;
-  case hid::U:
-    return hid::I;
-  case hid::Y:
-    return hid::O;
-  case hid::SEMICOLON:
-    return hid::P;
-  case hid::R:
-    return hid::S;
-  case hid::S:
-    return hid::D;
-  case hid::T:
-    return hid::F;
-  case hid::D:
-    return hid::G;
-  case hid::N:
-    return hid::J;
+// The host uses US QWERTY. Translate canonical physical positions into
+// Colemak usages here; QWERTY mode sends the physical usages unchanged.
+uint8_t colemakUsageForPhysicalKey(uint8_t physicalUsage) {
+  switch (physicalUsage) {
   case hid::E:
-    return hid::K;
-  case hid::I:
+    return hid::F;
+  case hid::R:
+    return hid::P;
+  case hid::T:
+    return hid::G;
+  case hid::Y:
+    return hid::J;
+  case hid::U:
     return hid::L;
+  case hid::I:
+    return hid::U;
   case hid::O:
+    return hid::Y;
+  case hid::P:
     return hid::SEMICOLON;
-  case hid::K:
+  case hid::S:
+    return hid::R;
+  case hid::D:
+    return hid::S;
+  case hid::F:
+    return hid::T;
+  case hid::G:
+    return hid::D;
+  case hid::J:
     return hid::N;
+  case hid::K:
+    return hid::E;
+  case hid::L:
+    return hid::I;
+  case hid::SEMICOLON:
+    return hid::O;
+  case hid::N:
+    return hid::K;
   default:
-    return qwertyUsage;
+    return physicalUsage;
   }
 }
 
@@ -616,23 +615,10 @@ bool InputController::takeAnimationStep(int8_t& direction) {
 }
 
 uint8_t InputController::activeUsageAt(uint8_t row, uint8_t col) const {
-  const uint8_t canonicalUsage = kKeymap[row][col];
-  if (activeLayout_ == KeyboardLayout::Colemak) {
-    return canonicalUsage;
-  }
-  return hidUsageForQwertyCharacterOnColemakHost(canonicalUsage);
-}
-
-uint8_t InputController::logicalUsageAt(uint8_t row, uint8_t col) const {
-  const uint8_t usage = kKeymap[row][col];
-  if (activeLayout_ == KeyboardLayout::Colemak) {
-    for (uint8_t candidate = hid::A; candidate <= hid::SLASH; ++candidate) {
-      if (hidUsageForQwertyCharacterOnColemakHost(candidate) == usage) {
-        return candidate;
-      }
-    }
-  }
-  return usage;
+  const uint8_t physicalUsage = kKeymap[row][col];
+  return activeLayout_ == KeyboardLayout::Colemak
+      ? colemakUsageForPhysicalKey(physicalUsage)
+      : physicalUsage;
 }
 
 void InputController::toggleKeyboardLayout() {
@@ -709,7 +695,7 @@ void InputController::captureAnimationKey(uint8_t row, uint8_t col) {
       queueAnimationKey(action, true);
     }
   } else {
-    queueAnimationKey(logicalUsageAt(row, col), false);
+    queueAnimationKey(activeUsageAt(row, col), false);
   }
 }
 
@@ -750,7 +736,7 @@ void InputController::handleKeyPress(uint8_t row, uint8_t col, uint32_t now) {
     if (kMuteKeyPosition.isMatch(row, col)) {
       settingsMenu_.select();
     } else {
-      settingsMenu_.key(logicalUsageAt(row, col), kKeymap[row][col]);
+      settingsMenu_.key(activeUsageAt(row, col), kKeymap[row][col]);
     }
     return;
   }

@@ -43,9 +43,11 @@ below Page Down. Tapping it switches Colemak (`CMK`) / QWERTY (`QTY`);
 holding it for 350 ms opens Settings. It never toggles Game mode.
 Enable or disable Game mode in **Settings → Keyboard → Game mode**, then
 choose **Save & exit**. It stays active after release and across power cycles.
-This remains a Colemak-first keyboard: leave the host input source on Colemak.
-`CMK` sends canonical matrix usages; `QTY` applies the existing inverse Colemak
-mapping. The physical remap does not change that translation.
+Set the host input source to **US QWERTY** for both firmware layouts.
+The keyboard starts in Colemak (`CMK`) and translates physical positions into
+Colemak HID usages. `QTY` sends the canonical QWERTY usages unchanged.
+When upgrading from the Colemak-host firmware, switch the host from Colemak
+to US QWERTY after flashing to avoid applying the layout twice.
 
 Hold `Fn` and tap `Layout/Settings` to request an OLED hardware reset and redraw.
 This chord does not switch layouts or enter Game mode.

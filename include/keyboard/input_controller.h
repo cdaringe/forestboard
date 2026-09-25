@@ -74,7 +74,6 @@ private:
   void handleKeyRelease(uint8_t row, uint8_t col);
   void toggleKeyboardLayout();
   uint8_t activeUsageAt(uint8_t row, uint8_t col) const;
-  uint8_t logicalUsageAt(uint8_t row, uint8_t col) const;
   void appendCaptureToken(const char* token);
   void sendReport();
 

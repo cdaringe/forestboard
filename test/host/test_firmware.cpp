@@ -75,7 +75,7 @@ static void serviceInput() {
 }
 
 static void testPhysicalLayout() {
-  // Physical bottom row/navigation and existing Colemak-host semantics.
+  // Physical bottom row/navigation and US-QWERTY host semantics.
   assert(kKeymap[5][2] == hid::APPLICATION && kKeymap[5][4] == hid::LEFT_GUI);
   assert(kKeymap[11][10] == kFn && kKeymap[11][8] == hid::RIGHT_ALT);
   assert(kKeymap[6][6] == hid::INSERT && kKeymap[6][5] == hid::HOME &&
@@ -88,7 +88,7 @@ static void testPhysicalLayout() {
   press(k, 8, 4, 0);
   release(k, 8, 4);
   assert(strcmp(k.layoutBadgeLabel(), "QTY") == 0);
-  assert(k.activeUsageAt(2, 4) == hid::K); // QWERTY E on a Colemak host.
+  assert(k.activeUsageAt(2, 4) == hid::E); // QWERTY E on a QWERTY host.
   press(k, 11, 10, 10);
   k.queueEncoderStep(1);
   int8_t direction;
@@ -101,6 +101,52 @@ static void testPhysicalLayout() {
   press(k, 7, 6, 30);
   assert(k.isInsertModeActive());
   release(k, 7, 6);
+}
+
+static void testFirmwareLayouts() {
+  applyConfiguration(Configuration{});
+  InputController input;
+  // Expected letters read left to right on the physical typing rows.
+  const char* rows[2][3] = {
+      {"qwfpgjluy;", "arstdhneio", "zxcvbkm"},
+      {"qwertyuiop", "asdfghjkl;", "zxcvbnm"},
+  };
+  const MatrixPosition positions[3][10] = {
+      {{2, 2}, {2, 3}, {2, 4}, {2, 5}, {2, 6}, {2, 7}, {2, 8}, {2, 9}, {2, 10},
+          {2, 11}},
+      {{3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 8}, {3, 9}, {3, 10}, {3, 11},
+          {9, 10}},
+      {{4, 2}, {4, 3}, {4, 4}, {4, 5}, {4, 6}, {4, 8}, {4, 9}},
+  };
+  for (unsigned layout = 0; layout < 2; ++layout) {
+    for (unsigned row = 0; row < 3; ++row) {
+      for (unsigned col = 0; rows[layout][row][col]; ++col) {
+        const char letter = rows[layout][row][col];
+        const uint8_t expected =
+            letter == ';' ? hid::SEMICOLON : hid::A + letter - 'a';
+        const auto position = positions[row][col];
+        press(input, position.row, position.col, 10);
+        assert(keyboardReport[2] == expected);
+        release(input, position.row, position.col);
+        assert(keyboardReport[2] == 0);
+      }
+    }
+    // Ctrl+Shift follows the selected letter mapping, including held switches.
+    press(input, 5, 1, 20);
+    press(input, 4, 0, 20);
+    press(input, 2, 4, 20);
+    assert(keyboardReport[0] == 0x03);
+    assert(isReportContaining(layout == 0 ? hid::F : hid::E));
+    press(input, 8, 4, 30);
+    release(input, 8, 4);
+    assert(keyboardReport[0] == 0x03);
+    assert(isReportContaining(layout == 0 ? hid::E : hid::F));
+    assert(!isReportContaining(layout == 0 ? hid::F : hid::E));
+    release(input, 2, 4);
+    release(input, 4, 0);
+    release(input, 5, 1);
+    assert(keyboardReport[0] == 0 && keyboardReport[2] == 0);
+  }
 }
 
 static void testGameMode() {
@@ -1222,6 +1268,7 @@ int main() {
   testCometsFinishDuringTypingBursts();
   testCometLaunchLocations();
   testPhysicalLayout();
+  testFirmwareLayouts();
   testGameMode();
   testSettingsMenu();
   testConfigurationLimits();

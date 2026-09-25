@@ -3,6 +3,10 @@
 Firmware for a custom fixed-split keyboard with a rotary encoder and OLED screen.
 Supports Colemak/QWERTY switching, volume controls, animations, and settings saved on the keyboard.
 
+Set your computer’s keyboard layout to **US QWERTY**. The firmware starts in
+Colemak; tap Layout/Settings to switch to QWERTY. If upgrading from the old
+firmware, change the computer’s layout from Colemak to US QWERTY after flashing.
+
 <a href="./assets/forest_board_1.jpg"><img src="./assets/forest_board_1.jpg" alt="Forestboard keyboard, view 1" width="400"></a>
 <a href="./assets/forest_board_2.jpg"><img src="./assets/forest_board_2.jpg" alt="Forestboard keyboard, view 2" width="400"></a>
 

@@ -8,7 +8,7 @@ keyboard or PlatformIO upload is needed.
 
 The fixtures exercise the real keyboard, USB adapter, display controller,
 transport and animation code against narrow Arduino/USB/GFX mocks.
-Coverage includes physical mapping and existing Colemak-host translation,
+Coverage includes physical mapping and firmware Colemak/QWERTY translation for a US-QWERTY host,
 layout tap/hold and game capture, menu-only Game mode control and queued input across mode changes, encoder
 backpressure and Consumer HID descriptors, nonblanking configuration refresh,
 reset recovery, animation pacing, and all three mountain-bike tricks. Shooting-star checks cover burst input without replacing active flights and
