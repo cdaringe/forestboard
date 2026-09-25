@@ -7,7 +7,7 @@
 #include "config/configuration.h"
 
 #ifndef FORESTBOARD_OLED_SPI_HZ
-#define FORESTBOARD_OLED_SPI_HZ 3000000UL
+#define FORESTBOARD_OLED_SPI_HZ 2000000UL
 #endif
 #ifndef FORESTBOARD_OLED_SOFTWARE_SPI
 // The installed STM32 SPI driver requires MISO. Passing NC leaves its
@@ -31,6 +31,9 @@ constexpr uint32_t oledDebugFrameIntervalMs =
 static_assert(
     FORESTBOARD_OLED_SPI_HZ > 0 && FORESTBOARD_OLED_SPI_HZ <= 4000000UL,
     "SH1107 SPI must not exceed 4 MHz at 3.3 V");
+static_assert(
+    !FORESTBOARD_OLED_SOFTWARE_SPI || FORESTBOARD_OLED_SPI_HZ <= 2000000UL,
+    "Software SPI needs at least 250 ns per half-cycle");
 static_assert(
     oledDebugFrameIntervalMs > 0, "Debug frame interval must be positive");
 } // namespace firmwareConfig

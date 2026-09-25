@@ -740,6 +740,103 @@ static void testRuntimeDisplaySettings() {
   applyConfiguration(Configuration{});
 }
 
+static void finishStartupRetry(DisplayController& display,
+    const DisplayStatus& status, uint32_t start = 0) {
+  for (uint32_t elapsed : {2000U, 2350U, 2450U}) {
+    fakeNow = start + elapsed;
+    display.render(fakeNow, status);
+  }
+}
+
+static void testSilentStartupRetry() {
+  applyConfiguration(Configuration{});
+  DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
+  for (uint32_t start : {0U, UINT32_MAX - 1000U}) {
+    DisplayController display;
+    fakeNow = start;
+    display.begin(serviceInput);
+    auto renderAt = [&](uint32_t elapsed) {
+      fakeNow = start + elapsed;
+      display.render(fakeNow, status);
+      assert(fakeNow == start + elapsed); // No blocking millisecond delays.
+    };
+    renderAt(350);
+    renderAt(450);
+    assert(display.isReady_ && !display.isRecovering_);
+    // All writes report success even if the panel silently ignored them.
+    // No failure injection or manual request may be needed for this retry.
+    assert(!failOled && !display.isRecoveryRequested_);
+    renderAt(1999);
+    const unsigned frames = pageWrites, callbacks = inputCalls;
+    oledCommands.clear();
+    display.animationManager_.select(9);
+    renderAt(2000);
+    assert(display.isResetHeld_ && !display.isReady_);
+    assert(!display.isStartupRetryPending_ && pinValues[PC9] == LOW);
+    assert(display.animationManager_.currentIndex() == 9);
+    renderAt(2349);
+    assert(pageWrites == frames && oledCommands.empty());
+    renderAt(2350);
+    assert(!display.isResetHeld_ && pinValues[PC9] == HIGH);
+    assert(oledCommands.front() == std::vector<uint8_t>({0xAE, 0xAD, 0x8A}));
+    renderAt(2449);
+    assert(pageWrites == frames && !display.isReady_);
+    renderAt(2450);
+    assert(display.isReady_ && !display.isRecovering_);
+    assert(pageWrites == frames + 64 && inputCalls == callbacks + 64);
+    assert(oledCommands.back() == std::vector<uint8_t>{0xAF});
+    for (uint32_t elapsed : {4000U, 6000U, 60000U, 120000U}) {
+      renderAt(elapsed);
+      assert(!display.isRecovering_ && pinValues[PC9] == HIGH);
+      assert(display.lastRecoveryAttemptAt_ == start + 2000U);
+    }
+  }
+
+  // Manual recovery before the scheduled retry consumes it, not a second blink.
+  DisplayController manual;
+  fakeNow = 0;
+  manual.begin(serviceInput);
+  fakeNow = 350;
+  manual.render(fakeNow, status);
+  fakeNow = 450;
+  manual.render(fakeNow, status);
+  manual.requestRecovery();
+  for (uint32_t now : {700U, 1050U, 1150U, 2000U, 4000U}) {
+    fakeNow = now;
+    manual.render(fakeNow, status);
+  }
+  assert(!manual.isStartupRetryPending_ && !manual.isRecovering_);
+  assert(manual.lastRecoveryAttemptAt_ == 700);
+
+  // A late loop must not restart a reset already in progress.
+  DisplayController late;
+  fakeNow = 0;
+  late.begin(serviceInput);
+  fakeNow = 2000;
+  late.render(fakeNow, status);
+  assert(!late.isStartupRetryPending_ && !late.isResetHeld_);
+  assert(late.lastRecoveryAttemptAt_ == 0);
+  fakeNow = 2100;
+  late.render(fakeNow, status);
+  assert(late.isReady_ && !late.isRecovering_);
+
+  // Sleep cancels a pending retry rather than running it later on wake-up.
+  DisplayController sleeping;
+  fakeNow = 0;
+  sleeping.begin(serviceInput);
+  fakeNow = 350;
+  sleeping.render(fakeNow, status);
+  fakeNow = 450;
+  sleeping.render(fakeNow, status);
+  fakeNow = 300000;
+  sleeping.render(fakeNow, status);
+  assert(!sleeping.isStartupRetryPending_ && sleeping.isPoweredOff_);
+  sleeping.onActivity(++fakeNow);
+  sleeping.render(fakeNow, status);
+  assert(!sleeping.isPoweredOff_ && !sleeping.isRecovering_);
+  assert(sleeping.lastRecoveryAttemptAt_ == 0);
+}
+
 static void testDisplayRecovery() {
   // Initialization is nonblocking, complete frame precedes ON, periodic repair
   // doesn't blank/reset, and explicit recovery retains the selected animation.
@@ -748,16 +845,26 @@ static void testDisplayRecovery() {
   display.begin(serviceInput);
   DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
   assert(fakeNow == 0 && display.isRecovering_);
-  fakeNow = 99;
+  assert(pinValues[PC9] == LOW);
+  oledCommands.clear();
+  fakeNow = 280; // The breakout supervisor may still be holding reset.
+  display.render(fakeNow, status);
+  assert(pageWrites == 0 && oledCommands.empty() && pinValues[PC9] == LOW);
+  fakeNow = 349;
+  display.render(fakeNow, status);
+  assert(oledCommands.empty());
+  fakeNow = 350;
+  display.render(fakeNow, status);
+  assert(pageWrites == 0 && pinValues[PC9] == HIGH);
+  fakeNow = 449;
   display.render(fakeNow, status);
   assert(pageWrites == 0);
-  fakeNow = 100;
+  fakeNow = 450;
   display.render(fakeNow, status);
-  assert(pageWrites == 16 && inputCalls == 16 && !display.isRecovering_);
+  assert(pageWrites == 64 && inputCalls == 64 && !display.isRecovering_);
   assert(oledCommands.back() == std::vector<uint8_t>{0xAF});
   oledCommands.clear();
-  fakeNow = 2100;
-  display.render(fakeNow, status);
+  finishStartupRetry(display, status);
   assert(display.lastRefreshAt_ == 0);
   fakeNow = 59980;
   display.render(fakeNow, status);
@@ -777,17 +884,39 @@ static void testDisplayRecovery() {
   display.render(fakeNow, status);
   assert(
       display.isRecovering_ && display.animationManager_.currentIndex() == 9);
-  fakeNow = 60110;
+  fakeNow = 60360;
+  display.render(fakeNow, status);
+  assert(display.isRecovering_);
+  fakeNow = 60460;
   display.render(fakeNow, status);
   assert(!display.isRecovering_);
   failOled = true;
-  fakeNow = 60130;
+  fakeNow = 60480;
   display.render(fakeNow, status);
   assert(display.isRecoveryRequested_);
   failOled = false;
-  fakeNow = 60140;
+  fakeNow = 60490;
   display.render(fakeNow, status);
   assert(display.isRecovering_);
+  // Configuration can fail after reset release; retry the complete sequence
+  // without ever treating a partially initialized panel as ready.
+  failOled = true;
+  fakeNow = 60840;
+  display.render(fakeNow, status);
+  assert(!display.isRecovering_ && !display.isReady_ && !display.isResetHeld_);
+  failOled = false;
+  fakeNow = 61489;
+  display.render(fakeNow, status);
+  assert(!display.isRecovering_);
+  fakeNow = 61490;
+  display.render(fakeNow, status);
+  assert(display.isResetHeld_ && pinValues[PC9] == LOW);
+  fakeNow = 61840;
+  display.render(fakeNow, status);
+  assert(!display.isResetHeld_ && !display.isReady_);
+  fakeNow = 61940;
+  display.render(fakeNow, status);
+  assert(display.isReady_ && !display.isRecovering_);
 }
 
 static void testScreenTimeout() {
@@ -801,7 +930,9 @@ static void testScreenTimeout() {
       fakeNow = start + elapsed;
       display.render(fakeNow, status);
     };
-    renderAt(100);
+    renderAt(350);
+    renderAt(450);
+    finishStartupRetry(display, status, start);
     renderAt(299999);
     assert(!display.isPoweredOff_);
     const auto frames = pageWrites;
@@ -816,8 +947,9 @@ static void testScreenTimeout() {
     assert(oledCommands.size() == 1);
     display.onActivity(start + 600001);
     renderAt(600001);
-    renderAt(600101);
-    assert(!display.isPoweredOff_ && pageWrites == frames + 16);
+    renderAt(600351);
+    renderAt(600451);
+    assert(!display.isPoweredOff_ && pageWrites == frames + 64);
     assert(oledCommands.back() == std::vector<uint8_t>{0xAF});
     renderAt(900000);
     assert(!display.isPoweredOff_);
@@ -842,8 +974,11 @@ static void testScreenTimeout() {
   DisplayController display;
   fakeNow = 0;
   display.begin(serviceInput);
-  fakeNow = 100;
+  fakeNow = 350;
   display.render(fakeNow, status);
+  fakeNow = 450;
+  display.render(fakeNow, status);
+  finishStartupRetry(display, status);
   fakeNow = 60000;
   failOled = true;
   display.render(fakeNow, status);
@@ -897,12 +1032,14 @@ static void testBootSplash() {
     display.begin(serviceInput);
     DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
     assert(fakeNow == start && !display.isSplashVisible_);
-    fakeNow = start + 100U;
+    fakeNow = start + 350U;
+    display.render(fakeNow, status);
+    fakeNow = start + 450U;
     const unsigned previousInputCalls = inputCalls;
     display.render(fakeNow, status);
     assert(display.isSplashVisible_ && display.splashShownAt_ == fakeNow);
     assert(inputCalls ==
-        previousInputCalls + 16); // Scanner serviced during splash transfer.
+        previousInputCalls + 64); // Scanner serviced during splash transfer.
     assert(display.display_.lastText == "forestboard");
     assert(display.display_.cursorX == 40 && display.display_.cursorY == 60);
     const uint8_t* pixels = display.display_.getBuffer();
@@ -922,18 +1059,21 @@ static void testBootSplash() {
     assert(right == 33 && left == 23);
     assert(left == 127 - (display.display_.cursorX + 65 - 1));
     assert(abs(top - (127 - bottom)) <= 1);
-    fakeNow = start + 3099U;
+    finishStartupRetry(display, status, start);
+    fakeNow = start + 3449U;
     display.render(fakeNow, status);
     assert(
         display.isSplashPending_ && display.display_.lastText == "forestboard");
-    fakeNow = start + 3100U;
+    fakeNow = start + 3450U;
     display.render(fakeNow, status);
     assert(!display.isSplashPending_ &&
         display.display_.lastText != "forestboard");
     display.requestRecovery();
-    fakeNow = start + 3200U;
+    fakeNow = start + 3600U;
     display.render(fakeNow, status);
-    fakeNow = start + 3300U;
+    fakeNow = start + 3950U;
+    display.render(fakeNow, status);
+    fakeNow = start + 4050U;
     display.render(fakeNow, status);
     assert(!display.isSplashPending_ &&
         display.display_.lastText != "forestboard");
@@ -942,21 +1082,25 @@ static void testBootSplash() {
   fakeNow = 0;
   delayed.begin(serviceInput);
   DisplayStatus status = {"CMK", "", 0, false, false, false, false, false};
+  fakeNow = 350;
+  delayed.render(fakeNow, status);
   failOled = true;
-  fakeNow = 100;
+  fakeNow = 450;
   delayed.render(fakeNow, status);
   assert(!delayed
           .isSplashVisible_); // A failed transfer does not consume splash time.
   failOled = false;
-  fakeNow = 110;
+  fakeNow = 460;
   delayed.render(fakeNow, status);
-  fakeNow = 210;
+  fakeNow = 810;
   delayed.render(fakeNow, status);
-  assert(delayed.isSplashVisible_ && delayed.splashShownAt_ == 210);
-  fakeNow = 3209;
+  fakeNow = 910;
+  delayed.render(fakeNow, status);
+  assert(delayed.isSplashVisible_ && delayed.splashShownAt_ == 910);
+  fakeNow = 3909;
   delayed.render(fakeNow, status);
   assert(delayed.isSplashPending_);
-  fakeNow = 3210;
+  fakeNow = 3910;
   delayed.render(fakeNow, status);
   assert(!delayed.isSplashPending_);
 }
@@ -992,16 +1136,19 @@ static void testPersistentSplashSetting() {
   display.animationManager_.select(9);
   DisplayStatus status = {
       "CMK", "", 0, false, false, false, false, true, &menu};
-  fakeNow = 100;
+  fakeNow = 350;
   display.render(fakeNow, status);
-  fakeNow = 3100;
+  fakeNow = 450;
+  display.render(fakeNow, status);
+  finishStartupRetry(display, status);
+  fakeNow = 3450;
   display.render(fakeNow, status);
   assert(
       !display.isSplashPending_ && display.display_.lastText == "forestboard");
   assert(
       !display.isInteractiveAnimation()); // Hidden game cannot consume typing.
   const auto selected = display.animationManager_.currentIndex();
-  display.stepAnimation(3200, 1);
+  display.stepAnimation(3450, 1);
   assert(display.animationManager_.currentIndex() == selected);
   status.isGameModeActive = false;
   fakeNow = 900000;
@@ -1091,6 +1238,7 @@ int main() {
   exportBikePreview();
   testRuntimeDisplaySettings();
   testDisplayRecovery();
+  testSilentStartupRetry();
   testBootSplash();
   testPersistentSplashSetting();
   testScreenTimeout();

@@ -206,8 +206,8 @@ constexpr uint8_t RIGHT_ALT = 0xE6;
 constexpr uint8_t RIGHT_GUI = 0xE7;
 } // namespace hid
 
-// 0xFF is the local momentary Fn key; it is never sent to the host. This is
-// the same educated physical-layout mapping used by cdaringe_ergowide in QMK.
+// 0xFF is the local momentary Fn key and is never sent to the host. The matrix
+// below follows the PCB's switch coordinates.
 constexpr uint8_t kFn = 0xFF;
 constexpr uint8_t kLayerKey = 0xFE;
 constexpr uint8_t kKeymap[kRows][kCols] = {

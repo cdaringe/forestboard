@@ -9,8 +9,12 @@ inline bool failOled = false;
 inline unsigned pageWrites = 0;
 class Adafruit_SPIDevice {
 public:
-  bool write(const uint8_t*, size_t) {
-    ++pageWrites;
+  bool write(const uint8_t* data, size_t length) {
+    if (pinValues[PB14] == HIGH) {
+      ++pageWrites;
+    } else {
+      oledCommands.emplace_back(data, data + length);
+    }
     return !failOled;
   }
 };

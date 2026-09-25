@@ -148,7 +148,7 @@ Only hardware and diagnostic build options remain in
 
 | Build setting | Production default | Purpose |
 |---|---:|---|
-| `FORESTBOARD_OLED_SPI_HZ` | `3000000` | Hardware SPI clock request, capped at 4 MHz |
+| `FORESTBOARD_OLED_SPI_HZ` | `2000000` | SPI ceiling; software supports up to 2 MHz, hardware up to 4 MHz |
 | `FORESTBOARD_OLED_SOFTWARE_SPI` | `1` | Software SPI; required with the installed STM32 driver |
 | `FORESTBOARD_OLED_DEBUG_FRAME_INTERVAL_MS` | `750` | Diagnostic update interval |
 | `FORESTBOARD_OLED_DEBUG_MODE` | `0` | Replace all animations with the isolation scene |
@@ -178,17 +178,44 @@ causes initialization to return without a peripheral, and the first transfer
 faults during display startup. USB can enumerate before that fault while the
 keyboard main loop never starts. Keep `FORESTBOARD_OLED_SOFTWARE_SPI=1` until a
 compatible hardware transport is implemented and tested on the board.
-Each frame sends 16 separately addressed 128-byte pages, servicing the keyboard
-between pages. Software SPI cannot promise the selected FPS ceiling, and
-`FORESTBOARD_OLED_SPI_HZ` only applies to the disabled hardware transport.
+Production software SPI uses explicit data-setup and clock-high delays (at
+least 250 ns each), timed with the Cortex-M4 cycle counter, with atomic STM32
+GPIO writes. This bypasses Adafruit BusIO's
+software transfer loop, whose nominal 1 MHz setting rounds its half-cycle delay
+to zero and sets data immediately before raising the clock. The build-time
+`FORESTBOARD_OLED_SPI_HZ` ceiling now applies to both transports; software timing
+rounds each half-cycle up to CPU cycles. Initialization verifies the counter is
+running before using it, and elapsed-cycle subtraction handles counter wrap.
+
+The display pins use MEDIUM output slew instead of STM32duino's VERY_HIGH
+default. Output slew controls electrical edge speed independently of the SPI
+bit rate. The [F411 datasheet, Table 55](https://www.st.com/resource/en/datasheet/stm32f411re.pdf)
+specifies a maximum 10 ns rise/fall at 3.3 V and 50 pF for MEDIUM, within the
+SH1107's 15 ns requirement. This reduces edge aggressiveness; it is not proof
+that ringing caused the observed corruption. Actual loading and waveforms
+still need to be checked on the assembled keyboard.
+
+Each frame sends 64 separately addressed 32-byte bursts, servicing the keyboard
+with chip select high between bursts. Every burst clears a pending command
+parameter, exits read-modify-write mode, and restores page addressing plus the
+absolute page/column. A transient address-mode error can therefore be repaired
+on the next burst, without waiting for the periodic configuration refresh.
+At the default speed, explicit delays total about 10.1 ms per frame (about
+0.16 ms between input callbacks), plus GPIO, rendering, interrupt, and input
+overhead. This removes the prior whole-microsecond writer's 40.2 ms delay
+floor; the panel's internal scan rate is separate. These are calculated
+delay budgets, not measurements on the assembled keyboard.
 Animation motion uses elapsed time instead of speeding up with refresh rate.
 
 Once per minute by default (adjustable in Settings), the firmware restores addressing, orientation, contrast,
 and timing without sending display-off/reset commands. Every frame rewrites
 all display RAM. This attempts to repair silent controller corruption; visual behavior still
 needs verification on the physical panel. Hardware reset is reserved for the manual chord or reported transfer/
-initialization failures, with nonblocking 100 ms power settling and a complete
-frame before display-on. Startup white tests and multi-second reset delays
+initialization failures. Reset is held low for 100 ms to allow the supply to
+settle before initialization, then configuration is followed by a separate
+100 ms settling interval and a complete frame before display-on. Both waits
+are nonblocking, so keyboard scanning continues. The same sequence runs on a
+manual recovery. Startup white tests and multi-second reset delays
 are removed. SPI provides no panel acknowledgement: firmware cannot detect
 all wiring noise, power faults, or a disconnected panel; persistent problems
 still need an electrical check.

@@ -60,7 +60,7 @@ src/
 Hardware build options live in `include/config/firmware_config.h`. `DisplayStatus`
 is the display's snapshot of keyboard state; the controller does not depend on
 `InputController`. Main supplies a callback that services keyboard input
-between OLED pages. Animation code does not send HID reports or transfer pixels
+between 32-byte OLED bursts. Animation code does not send HID reports or transfer pixels
 to the panel directly.
 
 Use small named operations and `is*` names for boolean state and predicates.

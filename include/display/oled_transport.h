@@ -9,8 +9,13 @@ public:
   OledTransport();
   bool allocate();
   bool configure(bool isAfterReset);
-  void reset();
+  void holdReset();
+  void releaseReset();
   bool transferFrame(void (*serviceInput)());
   bool powerOn();
   bool powerOff();
+
+private:
+  bool writeBytes(const uint8_t* bytes, size_t length, bool isData);
+  uint32_t halfCycleTicks_ = 0;
 };

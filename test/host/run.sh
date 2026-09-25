@@ -28,9 +28,15 @@ compiler_flags=(
 )
 g++ "${compiler_flags[@]}" test/host/test_storage.cpp -o "$output/storage-tests"
 "$output/storage-tests"
-g++ "${compiler_flags[@]}" test/host/test_firmware.cpp "${sources[@]}" \
+# Controller failure injection uses the mock SPI device; production software
+# SPI is exercised separately at GPIO/clock level below.
+g++ "${compiler_flags[@]}" -DFORESTBOARD_OLED_SOFTWARE_SPI=0 \
+  test/host/test_firmware.cpp "${sources[@]}" \
   -o "$output/firmware-tests"
 "$output/firmware-tests"
+g++ "${compiler_flags[@]}" test/host/test_oled_transport.cpp \
+  src/display/oled_transport.cpp -o "$output/oled-tests"
+"$output/oled-tests"
 g++ "${compiler_flags[@]}" -Itest/host/inc test/host/test_usb.cpp \
   -o "$output/usb-tests"
 "$output/usb-tests"

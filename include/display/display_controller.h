@@ -58,7 +58,10 @@ private:
   bool isKeystrokeBaselineKnown_ = false;
   bool isAllocated_ = false;
   bool isRecovering_ = false;
+  bool isResetHeld_ = false;
   bool isRecoveryRequested_ = false;
+  bool isStartupRetryPending_ = false;
+  uint32_t startupStartedAt_ = 0;
   uint32_t recoveryStartedAt_ = 0;
   uint32_t lastRecoveryAttemptAt_ = 0;
   uint32_t lastRefreshAt_ = 0;

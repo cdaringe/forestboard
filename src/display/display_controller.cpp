@@ -6,6 +6,12 @@
 
 namespace {
 constexpr uint32_t kBootSplashDurationMs = 3000;
+// Adafruit 5297's APX803 can hold panel reset for 280 ms after its supply
+// becomes valid. Give it margin before issuing any initialization commands.
+constexpr uint32_t kPanelResetHoldMs = 350;
+// SPI cannot acknowledge initialization. Replay the manual recovery sequence
+// once after startup, even if all initial writes appeared to succeed.
+constexpr uint32_t kStartupRetryDelayMs = 2000;
 } // namespace
 
 DisplayController::DisplayController() = default;
@@ -21,6 +27,8 @@ void DisplayController::begin(void (*serviceInput)()) {
   }
   lastAnimationChangeAt_ = millis();
   onActivity(millis());
+  startupStartedAt_ = millis();
+  isStartupRetryPending_ = true;
   startRecovery(millis());
 }
 
@@ -30,6 +38,8 @@ void DisplayController::onActivity(uint32_t now) {
 }
 
 void DisplayController::requestRecovery() {
+  // Explicit recovery supersedes the one-shot startup safeguard.
+  isStartupRetryPending_ = false;
   isRecoveryRequested_ = true;
 }
 
@@ -47,6 +57,7 @@ bool DisplayController::isInteractiveAnimation() const {
 void DisplayController::startRecovery(uint32_t now) {
   isReady_ = false;
   isRecovering_ = false;
+  isResetHeld_ = false;
   isRecoveryRequested_ = false;
   lastRecoveryAttemptAt_ = now;
   if (!isAllocated_) {
@@ -55,11 +66,8 @@ void DisplayController::startRecovery(uint32_t now) {
   if (!isAllocated_) {
     return;
   }
-  display_.reset();
-  if (!display_.configure(true)) {
-    return;
-  }
-  configuredContrast_ = configuration().contrast();
+  display_.holdReset();
+  isResetHeld_ = true;
   recoveryStartedAt_ = millis();
   isRecovering_ = true;
 }
@@ -71,7 +79,7 @@ bool DisplayController::isRecoveryDue(uint32_t now) const {
 }
 
 bool DisplayController::isPowerSettled(uint32_t now) const {
-  return isRecovering_ && now - recoveryStartedAt_ >= 100;
+  return isRecovering_ && !isResetHeld_ && now - recoveryStartedAt_ >= 100;
 }
 
 bool DisplayController::isFrameDue(uint32_t now) const {
@@ -87,9 +95,30 @@ bool DisplayController::isConfigurationRefreshDue(uint32_t now) const {
 }
 
 void DisplayController::serviceRecovery(uint32_t now) {
+  if (isStartupRetryPending_ &&
+      now - startupStartedAt_ >= kStartupRetryDelayMs) {
+    isStartupRetryPending_ = false;
+    // Do not interrupt an ongoing reset or duplicate a reported-failure retry.
+    if (isReady_ && !isRecovering_) {
+      requestRecovery();
+    }
+  }
   if (isRecoveryDue(now)) {
     startRecovery(now);
     return; // The reset captured a newer millis(); avoid subtracting stale now.
+  }
+  if (isResetHeld_ && now - recoveryStartedAt_ >= kPanelResetHoldMs) {
+    // Let the supply settle with reset asserted, then configure and allow a
+    // separate 100 ms power-settling interval. Neither phase blocks typing.
+    display_.releaseReset();
+    isResetHeld_ = false;
+    if (!display_.configure(true)) {
+      isRecovering_ = false;
+      return;
+    }
+    configuredContrast_ = configuration().contrast();
+    recoveryStartedAt_ = millis();
+    return;
   }
   if (isPowerSettled(now)) {
     isReady_ = true;
@@ -173,6 +202,7 @@ void DisplayController::render(uint32_t now, const DisplayStatus& status) {
   isIdle_ =
       idleTimeoutMs != 0 && (isIdle_ || now - lastActivityAt_ >= idleTimeoutMs);
   if (isIdle_) {
+    isStartupRetryPending_ = false; // Never defer a boot reset until wake-up.
     if (isAllocated_ && !isPoweredOff_) {
       isPoweredOff_ = display_.powerOff();
     }

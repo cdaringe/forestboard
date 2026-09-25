@@ -17,7 +17,10 @@ inline uint32_t millis() {
 inline void delay(uint32_t ms) {
   fakeNow += ms;
 }
-inline void delayMicroseconds(uint32_t) {}
+inline uint64_t fakeMicros = 0;
+inline void delayMicroseconds(uint32_t us) {
+  fakeMicros += us;
+}
 constexpr int HIGH = 1, LOW = 0, OUTPUT = 1, INPUT = 0, INPUT_PULLUP = 2;
 enum {
   PA0,
@@ -71,8 +74,12 @@ enum {
   PD2
 };
 inline int pinValues[64] = {};
+inline void (*digitalWriteObserver)(uint32_t, int) = nullptr;
 inline void pinMode(uint32_t, int) {}
 inline void digitalWrite(uint32_t pin, int value) {
+  if (digitalWriteObserver != nullptr) {
+    digitalWriteObserver(pin, value);
+  }
   pinValues[pin] = value;
 }
 inline int (*digitalReadOverride)(uint32_t) = nullptr;
